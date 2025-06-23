@@ -1,0 +1,74 @@
+🚀 Redis Operator has been installed successfully!
+
+📋 Installation Details:
+- Release Name: {{ .Release.Name }}
+- Namespace: {{ .Release.Namespace }}
+- Chart Version: {{ .Chart.Version }}
+- App Version: {{ .Chart.AppVersion }}
+
+🔧 Operator Configuration:
+- Image: {{ include "redis-operator.image" . }}
+- Replicas: {{ .Values.replicaCount }}
+{{- if .Values.metrics.enabled }}
+- Metrics: Enabled on port {{ .Values.metrics.service.port }}
+{{- else }}
+- Metrics: Disabled
+{{- end }}
+{{- if .Values.leaderElection.enabled }}
+- Leader Election: Enabled
+{{- else }}
+- Leader Election: Disabled
+{{- end }}
+
+📚 Next Steps:
+
+1. Verify the operator is running:
+   kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/name={{ include "redis-operator.name" . }}
+
+2. Check the operator logs:
+   kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/name={{ include "redis-operator.name" . }} -f
+
+3. Create your first Redis instance:
+   kubectl apply -f - <<EOF
+   apiVersion: koncache.greedykomodo/v1alpha1
+   kind: Redis
+   metadata:
+     name: my-redis
+     namespace: default
+   spec:
+     mode: standalone
+     storage:
+       size: 1Gi
+     resources:
+       requests:
+         cpu: 100m
+         memory: 128Mi
+       limits:
+         cpu: 500m
+         memory: 512Mi
+   EOF
+
+4. Check your Redis instance:
+   kubectl get redis -n default
+   kubectl describe redis my-redis -n default
+
+5. Connect to Redis:
+   kubectl run redis-client --rm -it --restart=Never --image=redis:7.2-alpine -- redis-cli -h my-redis.default.svc.cluster.local
+
+📖 Documentation:
+   For more examples and configuration options, visit:
+   https://github.com/GreedyKomodoDragon/redis-operator
+
+{{- if .Values.metrics.serviceMonitor.enabled }}
+
+🔍 Monitoring:
+   ServiceMonitor has been created. Your Prometheus should automatically discover the operator metrics.
+{{- end }}
+
+{{- if not .Values.crd.install }}
+
+⚠️  Note:
+   CRD installation is disabled. Make sure Redis CRDs are installed separately.
+{{- end }}
+
+Happy Redis managing! 🎉

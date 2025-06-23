@@ -1,0 +1,21 @@
+apiVersion: v2
+name: redis-operator
+description: A Helm chart for Redis Operator
+type: application
+version: 0.1.0
+appVersion: "0.0.1"
+keywords:
+  - redis
+  - operator
+  - database
+  - cache
+home: https://github.com/GreedyKomodoDragon/redis-operator
+sources:
+  - https://github.com/GreedyKomodoDragon/redis-operator
+maintainers:
+  - name: GreedyKomodoDragon
+    email: your-email@example.com
+annotations:
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/operator: "true"
+  artifacthub.io/operatorCapabilities: Full Lifecycle

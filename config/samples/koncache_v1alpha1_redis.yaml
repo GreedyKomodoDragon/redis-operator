@@ -6,4 +6,42 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: redis-sample
 spec:
-  # TODO(user): Add fields here
+  mode: standalone
+  version: "7.2"
+  image: "redis:7.2-alpine"
+  imagePullPolicy: IfNotPresent
+  port: 6379
+  replicas: 1
+  
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+  
+  storage:
+    enabled: true
+    size: "1Gi"
+    storageClass: "standard"
+  
+  config:
+    maxmemory: "256mb"
+    maxmemoryPolicy: "allkeys-lru"
+    save: "900 1 300 10 60 10000"
+    appendonly: "yes"
+    appendfsync: "everysec"
+  
+  security:
+    auth:
+      enabled: true
+      secretName: "redis-auth"
+      secretKey: "password"
+  
+  monitoring:
+    enabled: true
+    exporter:
+      enabled: true
+      image: "oliver006/redis_exporter:latest"
+      port: 9121

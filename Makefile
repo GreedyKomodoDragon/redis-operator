@@ -1,5 +1,15 @@
 # VERSION defines the project version for the bundle.
-# Update this value when you upgrade the version of your project.
+# Update this value when you upgrade the ve.PHONY: manifests
+manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
+	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+
+.PHONY: helm-crd
+helm-crd: manifests ## Update Helm chart CRD template from generated CRDs.
+	@echo "Updating Helm chart CRD template..."
+	@echo "{{- if .Values.crd.install }}" > $(HELM_CHART_DIR)/templates/crd.yaml
+	@cat config/crd/bases/koncache.greedykomodo_redis.yaml >> $(HELM_CHART_DIR)/templates/crd.yaml
+	@echo "{{- end }}" >> $(HELM_CHART_DIR)/templates/crd.yaml
+	@echo "Helm chart CRD template updated successfully!"our project.
 # To re-generate a bundle for another specific version without changing the standard setup, you can:
 # - use the VERSION as arg of the bundle target (e.g make bundle VERSION=0.0.2)
 # - use environment variables to overwrite this value (e.g export VERSION=0.0.2)
@@ -50,7 +60,7 @@ endif
 # This is useful for CI or a project to utilize a specific version of the operator-sdk toolkit.
 OPERATOR_SDK_VERSION ?= v1.40.0
 # Image URL to use all building/pushing image targets
-IMG ?= controller:latest
+IMG ?= greedykomodo/redis-operator:latest
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -64,6 +74,9 @@ endif
 # scaffolded by default. However, you might want to replace it to use other
 # tools. (i.e. podman)
 CONTAINER_TOOL ?= docker
+
+# HELM_CHART_DIR defines the directory containing the Helm chart
+HELM_CHART_DIR ?= chart/redis-operator
 
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 # Options are set to exit when a recipe line exits non-zero or a piped command fails.
@@ -95,6 +108,33 @@ help: ## Display this help.
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	@echo "Updating Helm chart CRD template..."
+	@cp config/crd/bases/koncache.greedykomodo_redis.yaml $(HELM_CHART_DIR)/templates/crd-raw.yaml
+	@echo "{{- if .Values.crd.install }}" > $(HELM_CHART_DIR)/templates/crd.yaml
+	@cat $(HELM_CHART_DIR)/templates/crd-raw.yaml | sed 's/^/  /' >> $(HELM_CHART_DIR)/templates/crd.yaml
+	@echo "{{- end }}" >> $(HELM_CHART_DIR)/templates/crd.yaml
+	@rm $(HELM_CHART_DIR)/templates/crd-raw.yaml
+	@echo "Helm chart CRD template updated successfully!"
+
+.PHONY: helm-lint
+helm-lint: helm ## Lint the Helm chart
+	$(HELM) lint $(HELM_CHART_DIR)
+
+.PHONY: helm-template
+helm-template: helm ## Generate Helm template output
+	$(HELM) template redis-operator $(HELM_CHART_DIR) --debug
+
+.PHONY: helm-package
+helm-package: helm ## Package the Helm chart
+	$(HELM) package $(HELM_CHART_DIR) --destination dist/
+
+.PHONY: helm-install
+helm-install: helm ## Install the Helm chart
+	$(HELM) upgrade --install redis-operator $(HELM_CHART_DIR) --namespace redis-operator-system --create-namespace
+
+.PHONY: helm-uninstall
+helm-uninstall: helm ## Uninstall the Helm chart
+	$(HELM) uninstall redis-operator --namespace redis-operator-system
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -171,10 +211,9 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	rm Dockerfile.cross
 
 .PHONY: build-installer
-build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
+build-installer: manifests generate helm ## Generate a consolidated YAML with CRDs and deployment using Helm.
 	mkdir -p dist
-	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
-	$(KUSTOMIZE) build config/default > dist/install.yaml
+	$(HELM) template redis-operator $(HELM_CHART_DIR) --set operator.image.repository=$(shell echo ${IMG} | cut -d: -f1) --set operator.image.tag=$(shell echo ${IMG} | cut -d: -f2) > dist/install.yaml
 
 ##@ Deployment
 
@@ -183,21 +222,20 @@ ifndef ignore-not-found
 endif
 
 .PHONY: install
-install: manifests kustomize ## Install CRDs into the K8s cluster specified in ~/.kube/config.
-	$(KUSTOMIZE) build config/crd | $(KUBECTL) apply -f -
+install: helm ## Install CRDs into the K8s cluster specified in ~/.kube/config using Helm.
+	$(HELM) upgrade --install redis-operator-crd $(HELM_CHART_DIR) --namespace redis-operator-system --create-namespace --set operator.image.tag="none" --set replicaCount=0
 
 .PHONY: uninstall
-uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
-	$(KUSTOMIZE) build config/crd | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
+uninstall: helm ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config using Helm.
+	$(HELM) uninstall redis-operator-crd --namespace redis-operator-system || true
 
 .PHONY: deploy
-deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
-	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
-	$(KUSTOMIZE) build config/default | $(KUBECTL) apply -f -
+deploy: helm ## Deploy controller to the K8s cluster specified in ~/.kube/config using Helm.
+	$(HELM) upgrade --install redis-operator $(HELM_CHART_DIR) --namespace redis-operator-system --create-namespace --set operator.image.repository=$(shell echo ${IMG} | cut -d: -f1) --set operator.image.tag=$(shell echo ${IMG} | cut -d: -f2)
 
 .PHONY: undeploy
-undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
-	$(KUSTOMIZE) build config/default | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
+undeploy: helm ## Undeploy controller from the K8s cluster specified in ~/.kube/config using Helm.
+	$(HELM) uninstall redis-operator --namespace redis-operator-system || true
 
 ##@ Dependencies
 
@@ -208,6 +246,7 @@ $(LOCALBIN):
 
 ## Tool Binaries
 KUBECTL ?= kubectl
+HELM ?= helm
 KIND ?= kind
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
@@ -215,6 +254,7 @@ ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
 
 ## Tool Versions
+HELM_VERSION ?= v3.14.0
 KUSTOMIZE_VERSION ?= v5.6.0
 CONTROLLER_TOOLS_VERSION ?= v0.17.2
 #ENVTEST_VERSION is the version of controller-runtime release branch to fetch the envtest setup script (i.e. release-0.20)
@@ -222,6 +262,18 @@ ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller
 #ENVTEST_K8S_VERSION is the version of Kubernetes to use for setting up ENVTEST binaries (i.e. 1.31)
 ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
 GOLANGCI_LINT_VERSION ?= v1.63.4
+
+.PHONY: helm
+helm: ## Download helm locally if necessary.
+	@if ! command -v helm &> /dev/null; then \
+		echo "Installing Helm..."; \
+		curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3; \
+		chmod 700 get_helm.sh; \
+		./get_helm.sh --version $(HELM_VERSION); \
+		rm get_helm.sh; \
+	else \
+		echo "Helm is already installed"; \
+	fi
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.

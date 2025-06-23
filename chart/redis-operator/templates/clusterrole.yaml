@@ -1,15 +1,27 @@
----
+{{- if .Values.rbac.create }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: manager-role
+  name: {{ include "redis-operator.clusterRoleName" . }}
+  labels:
+    {{- include "redis-operator.labels" . | nindent 4 }}
 rules:
 - apiGroups:
   - ""
   resources:
   - configmaps
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - persistentvolumeclaims
-  - services
   verbs:
   - create
   - delete
@@ -25,6 +37,18 @@ rules:
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - apps
@@ -64,3 +88,4 @@ rules:
   - get
   - patch
   - update
+{{- end }}

@@ -1,0 +1,157 @@
+# Default values for redis-operator.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# Operator configuration
+operator:
+  # Image configuration
+  image:
+    repository: greedykomodo/redis-operator
+    tag: latest
+    pullPolicy: IfNotPresent
+  
+  # Resource limits and requests
+  resources:
+    limits:
+      cpu: 500m
+      memory: 128Mi
+    requests:
+      cpu: 10m
+      memory: 64Mi
+  
+  # Node selector for operator pod
+  nodeSelector: {}
+  
+  # Tolerations for operator pod
+  tolerations: []
+  
+  # Affinity for operator pod
+  affinity: {}
+  
+  # Security context
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+      - ALL
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+
+# Service account configuration
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Automatically mount a ServiceAccount's API credentials?
+  automount: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+# RBAC configuration
+rbac:
+  # Specifies whether RBAC resources should be created
+  create: true
+
+# Leader election configuration
+leaderElection:
+  enabled: true
+
+# Metrics configuration
+metrics:
+  # Enable metrics endpoint
+  enabled: true
+  # Service configuration for metrics
+  service:
+    type: ClusterIP
+    port: 8080
+    annotations: {}
+  
+  # ServiceMonitor for Prometheus
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+    annotations: {}
+
+# Webhook configuration
+webhook:
+  # Enable admission webhooks
+  enabled: false
+  # Certificate management
+  certManager:
+    enabled: false
+  # Webhook service configuration
+  service:
+    type: ClusterIP
+    port: 9443
+
+# Custom Resource Definitions
+crd:
+  # Install CRDs
+  install: true
+  # Keep CRDs on uninstall
+  keep: false
+
+# Pod disruption budget
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+  maxUnavailable: null
+
+# Additional environment variables
+env: []
+# - name: EXAMPLE_VAR
+#   value: "example-value"
+
+# Additional volumes
+volumes: []
+# - name: extra-config
+#   configMap:
+#     name: extra-config
+
+# Additional volume mounts
+volumeMounts: []
+# - name: extra-config
+#   mountPath: /etc/extra-config
+#   readOnly: true
+
+# Pod annotations
+podAnnotations: {}
+
+# Pod labels
+podLabels: {}
+
+# Deployment annotations
+deploymentAnnotations: {}
+
+# Number of replicas (should be 1 for operator)
+replicaCount: 1
+
+# Image pull secrets
+imagePullSecrets: []
+
+# Full name override
+fullnameOverride: ""
+
+# Name override
+nameOverride: ""
+
+# Priority class name
+priorityClassName: ""
+
+# DNS policy
+dnsPolicy: ""
+
+# DNS config
+dnsConfig: {}
+
+# Host network
+hostNetwork: false
+
+# Termination grace period
+terminationGracePeriodSeconds: 10
