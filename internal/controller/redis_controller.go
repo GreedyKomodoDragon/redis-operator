@@ -1,24 +1,9 @@
-/*
-Copyright 2025.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package controller
 
 import (
 	"context"
 	"fmt"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -76,7 +61,12 @@ func (r *RedisReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	// Handle different Redis modes
 	switch redis.Spec.Mode {
 	case koncachev1alpha1.RedisModeStandalone, "": // Default to standalone if mode is empty
-		return r.standaloneController.Reconcile(ctx, redis)
+		result, err := r.standaloneController.Reconcile(ctx, redis)
+		// Add a small requeue delay for stable resources to reduce reconciliation frequency
+		if err == nil && !result.Requeue && result.RequeueAfter == 0 {
+			result.RequeueAfter = 30 * time.Second
+		}
+		return result, err
 	case koncachev1alpha1.RedisModeCluster:
 		return r.reconcileCluster(ctx, redis)
 	case koncachev1alpha1.RedisModeSentinel:

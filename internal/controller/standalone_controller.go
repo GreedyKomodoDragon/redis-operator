@@ -1,19 +1,3 @@
-/*
-Copyright 2025.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package controller
 
 import (
@@ -23,7 +7,6 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -138,19 +121,37 @@ func (s *StandaloneController) reconcileStatefulSet(ctx context.Context, redis *
 		if err != nil {
 			return nil, false, err
 		}
-		// StatefulSet created successfully - return and requeue
-		return foundStatefulSet, true, nil
+		// StatefulSet created successfully - return the created statefulSet and requeue
+		return statefulSet, true, nil
 	} else if err != nil {
 		return nil, false, err
 	}
 
-	return foundStatefulSet, false, nil
+	if !s.needsStatefulSetUpdate(redis, foundStatefulSet, statefulSet) {
+		log.V(1).Info("StatefulSet is up-to-date, no changes needed", "StatefulSet.Name", foundStatefulSet.Name)
+		// No changes needed, return the existing StatefulSet and do not requeue
+		return foundStatefulSet, false, nil
+	}
+
+	log.Info("StatefulSet spec has changed, updating", "StatefulSet.Name", foundStatefulSet.Name)
+
+	// Update the existing StatefulSet with the new spec
+	foundStatefulSet.Spec = statefulSet.Spec
+	foundStatefulSet.Labels = statefulSet.Labels
+	foundStatefulSet.Annotations = statefulSet.Annotations
+
+	if err := s.Update(ctx, foundStatefulSet); err != nil {
+		return nil, false, err
+	}
+	// Return true to requeue and wait for the update to be processed
+	return foundStatefulSet, true, nil
+
 }
 
 // configMapForRedis returns a ConfigMap object for the Redis configuration
 func (s *StandaloneController) configMapForRedis(redis *koncachev1alpha1.Redis) *corev1.ConfigMap {
-	labels := labelsForRedis(redis.Name)
-	configData := s.buildRedisConfig(redis)
+	labels := LabelsForRedis(redis.Name)
+	configData := BuildRedisConfig(redis)
 
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -166,11 +167,8 @@ func (s *StandaloneController) configMapForRedis(redis *koncachev1alpha1.Redis) 
 
 // serviceForRedis returns a Service object for Redis
 func (s *StandaloneController) serviceForRedis(redis *koncachev1alpha1.Redis) *corev1.Service {
-	labels := labelsForRedis(redis.Name)
-	port := redis.Spec.Port
-	if port == 0 {
-		port = 6379 // Default Redis port
-	}
+	labels := LabelsForRedis(redis.Name)
+	port := GetRedisPort(redis)
 
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -196,15 +194,12 @@ func (s *StandaloneController) serviceForRedis(redis *koncachev1alpha1.Redis) *c
 
 // statefulSetForRedis returns a StatefulSet object for Redis
 func (s *StandaloneController) statefulSetForRedis(redis *koncachev1alpha1.Redis) *appsv1.StatefulSet {
-	labels := labelsForRedis(redis.Name)
+	labels := LabelsForRedis(redis.Name)
 	replicas := int32(1) // Standalone Redis always has 1 replica
-	port := redis.Spec.Port
-	if port == 0 {
-		port = 6379
-	}
+	port := GetRedisPort(redis)
 
 	// Build container
-	container := s.buildRedisContainer(redis, port)
+	container := BuildRedisContainer(redis, port)
 
 	// Build pod template
 	podTemplate := corev1.PodTemplateSpec{
@@ -219,18 +214,7 @@ func (s *StandaloneController) statefulSetForRedis(redis *koncachev1alpha1.Redis
 			Affinity:           redis.Spec.Affinity,
 			ImagePullSecrets:   redis.Spec.ImagePullSecrets,
 			Containers:         []corev1.Container{container},
-			Volumes: []corev1.Volume{
-				{
-					Name: "redis-config",
-					VolumeSource: corev1.VolumeSource{
-						ConfigMap: &corev1.ConfigMapVolumeSource{
-							LocalObjectReference: corev1.LocalObjectReference{
-								Name: redis.Name + "-config",
-							},
-						},
-					},
-				},
-			},
+			Volumes:            []corev1.Volume{BuildConfigMapVolume(redis.Name)},
 		},
 	}
 
@@ -240,7 +224,7 @@ func (s *StandaloneController) statefulSetForRedis(redis *koncachev1alpha1.Redis
 	}
 
 	// Build volume claim template
-	volumeClaimTemplate := s.buildVolumeClaimTemplate(redis)
+	volumeClaimTemplate := BuildVolumeClaimTemplate(redis)
 
 	return &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -261,176 +245,133 @@ func (s *StandaloneController) statefulSetForRedis(redis *koncachev1alpha1.Redis
 	}
 }
 
-// buildRedisContainer builds the Redis container specification
-func (s *StandaloneController) buildRedisContainer(redis *koncachev1alpha1.Redis, port int32) corev1.Container {
-	container := corev1.Container{
-		Name:            "redis",
-		Image:           redis.Spec.Image,
-		ImagePullPolicy: redis.Spec.ImagePullPolicy,
-		Ports: []corev1.ContainerPort{
-			{
-				ContainerPort: port,
-				Name:          "redis",
-				Protocol:      corev1.ProtocolTCP,
-			},
-		},
-		Resources: redis.Spec.Resources,
-		VolumeMounts: []corev1.VolumeMount{
-			{
-				Name:      "redis-data",
-				MountPath: "/data",
-			},
-			{
-				Name:      "redis-config",
-				MountPath: "/usr/local/etc/redis/redis.conf",
-				SubPath:   "redis.conf",
-				ReadOnly:  true,
-			},
-		},
-		Command: []string{"redis-server"},
-		Args:    []string{"/usr/local/etc/redis/redis.conf"},
-	}
-
-	// Add liveness and readiness probes
-	container.LivenessProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			TCPSocket: &corev1.TCPSocketAction{
-				Port: intstr.FromInt(int(port)),
-			},
-		},
-		InitialDelaySeconds: 30,
-		PeriodSeconds:       10,
-		TimeoutSeconds:      5,
-		FailureThreshold:    3,
-	}
-
-	container.ReadinessProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			Exec: &corev1.ExecAction{
-				Command: []string{"redis-cli", "ping"},
-			},
-		},
-		InitialDelaySeconds: 5,
-		PeriodSeconds:       10,
-		TimeoutSeconds:      1,
-		FailureThreshold:    3,
-	}
-
-	return container
-}
-
-// buildVolumeClaimTemplate builds the volume claim template for the StatefulSet
-func (s *StandaloneController) buildVolumeClaimTemplate(redis *koncachev1alpha1.Redis) corev1.PersistentVolumeClaim {
-	storageSize := redis.Spec.Storage.Size
-	if storageSize.IsZero() {
-		storageSize = resource.MustParse("1Gi")
-	}
-
-	accessModes := redis.Spec.Storage.AccessModes
-	if len(accessModes) == 0 {
-		accessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}
-	}
-
-	return corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "redis-data",
-		},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes:      accessModes,
-			StorageClassName: redis.Spec.Storage.StorageClassName,
-			VolumeMode:       redis.Spec.Storage.VolumeMode,
-			Resources: corev1.VolumeResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceStorage: storageSize,
-				},
-			},
-		},
-	}
-}
-
-// buildRedisConfig builds the Redis configuration string
-func (s *StandaloneController) buildRedisConfig(redis *koncachev1alpha1.Redis) string {
-	config := ""
-
-	// Basic configuration
-	if redis.Spec.Config.MaxMemory != "" {
-		config += fmt.Sprintf("maxmemory %s\n", redis.Spec.Config.MaxMemory)
-	}
-	if redis.Spec.Config.MaxMemoryPolicy != "" {
-		config += fmt.Sprintf("maxmemory-policy %s\n", redis.Spec.Config.MaxMemoryPolicy)
-	}
-
-	// Persistence configuration
-	if len(redis.Spec.Config.Save) > 0 {
-		for _, save := range redis.Spec.Config.Save {
-			config += fmt.Sprintf("save %s\n", save)
-		}
-	}
-
-	if redis.Spec.Config.AppendOnly != nil && *redis.Spec.Config.AppendOnly {
-		config += "appendonly yes\n"
-		if redis.Spec.Config.AppendFsync != "" {
-			config += fmt.Sprintf("appendfsync %s\n", redis.Spec.Config.AppendFsync)
-		}
-	}
-
-	// Network configuration
-	config += fmt.Sprintf("timeout %d\n", redis.Spec.Config.Timeout)
-	config += fmt.Sprintf("tcp-keepalive %d\n", redis.Spec.Config.TCPKeepAlive)
-	config += fmt.Sprintf("databases %d\n", redis.Spec.Config.Databases)
-
-	// Logging
-	if redis.Spec.Config.LogLevel != "" {
-		config += fmt.Sprintf("loglevel %s\n", redis.Spec.Config.LogLevel)
-	}
-
-	// Security
-	if redis.Spec.Security.RequireAuth != nil && *redis.Spec.Security.RequireAuth {
-		config += "protected-mode yes\n"
-		// Note: Password will be set via environment variable or secret
-	}
-
-	// Additional custom configuration
-	for key, value := range redis.Spec.Config.AdditionalConfig {
-		config += fmt.Sprintf("%s %s\n", key, value)
-	}
-
-	// Default settings if config is empty
-	if config == "" {
-		config = `# Redis configuration
-bind 0.0.0.0
-port 6379
-dir /data
-appendonly yes
-appendfsync everysec
-maxmemory-policy allkeys-lru
-`
-	}
-
-	return config
-}
-
 // updateRedisStatus updates the status of the Redis instance
 func (s *StandaloneController) updateRedisStatus(ctx context.Context, redis *koncachev1alpha1.Redis, statefulSet *appsv1.StatefulSet) error {
-	// Update status based on StatefulSet status
-	redis.Status.ObservedGeneration = redis.Generation
+	// Create a retry mechanism to handle conflicts
+	return s.updateStatusWithRetry(ctx, redis, func(currentRedis *koncachev1alpha1.Redis) {
+		// Update status based on StatefulSet status
+		currentRedis.Status.ObservedGeneration = currentRedis.Generation
 
-	if statefulSet.Status.ReadyReplicas == *statefulSet.Spec.Replicas {
-		redis.Status.Phase = koncachev1alpha1.RedisPhaseRunning
-		redis.Status.Ready = true
-	} else {
-		redis.Status.Phase = koncachev1alpha1.RedisPhasePending
-		redis.Status.Ready = false
+		if statefulSet.Status.ReadyReplicas == *statefulSet.Spec.Replicas {
+			currentRedis.Status.Phase = koncachev1alpha1.RedisPhaseRunning
+			currentRedis.Status.Ready = true
+		} else {
+			currentRedis.Status.Phase = koncachev1alpha1.RedisPhasePending
+			currentRedis.Status.Ready = false
+		}
+
+		// Set endpoint
+		port := GetRedisPort(currentRedis)
+		currentRedis.Status.Endpoint = fmt.Sprintf("%s.%s.svc.cluster.local", currentRedis.Name, currentRedis.Namespace)
+		currentRedis.Status.Port = port
+		currentRedis.Status.Version = currentRedis.Spec.Version
+	})
+}
+
+// updateStatusWithRetry handles the status update with retry mechanism to avoid conflicts
+func (s *StandaloneController) updateStatusWithRetry(ctx context.Context, redis *koncachev1alpha1.Redis, updateFunc func(*koncachev1alpha1.Redis)) error {
+	const maxRetries = 5
+
+	for i := 0; i < maxRetries; i++ {
+		// Fetch the latest version of the Redis object
+		currentRedis := &koncachev1alpha1.Redis{}
+		if err := s.Get(ctx, types.NamespacedName{Name: redis.Name, Namespace: redis.Namespace}, currentRedis); err != nil {
+			return err
+		}
+
+		// Store the original status for comparison
+		originalStatus := currentRedis.Status.DeepCopy()
+
+		// Apply the update function to the current Redis object
+		updateFunc(currentRedis)
+
+		// Check if the status actually changed to avoid unnecessary updates
+		if statusEqual(originalStatus, &currentRedis.Status) {
+			logf.FromContext(ctx).V(1).Info("Redis status unchanged, skipping update")
+			return nil
+		}
+
+		// Try to update the status
+		if err := s.Status().Update(ctx, currentRedis); err != nil {
+			if errors.IsConflict(err) && i < maxRetries-1 {
+				// If it's a conflict error and we haven't exceeded max retries, continue
+				logf.FromContext(ctx).Info("Conflict updating Redis status, retrying", "attempt", i+1)
+				continue
+			}
+			return err
+		}
+
+		// Success - break out of retry loop
+		return nil
 	}
 
-	// Set endpoint
-	port := redis.Spec.Port
-	if port == 0 {
-		port = 6379
-	}
-	redis.Status.Endpoint = fmt.Sprintf("%s.%s.svc.cluster.local", redis.Name, redis.Namespace)
-	redis.Status.Port = port
-	redis.Status.Version = redis.Spec.Version
+	return fmt.Errorf("failed to update Redis status after %d retries", maxRetries)
+}
 
-	return s.Status().Update(ctx, redis)
+// statusEqual compares two RedisStatus objects for equality
+func statusEqual(a, b *koncachev1alpha1.RedisStatus) bool {
+	return a.Phase == b.Phase &&
+		a.Ready == b.Ready &&
+		a.Endpoint == b.Endpoint &&
+		a.Port == b.Port &&
+		a.Version == b.Version &&
+		a.ObservedGeneration == b.ObservedGeneration
+}
+
+// needsStatefulSetUpdate checks if the StatefulSet needs to be updated based on the Redis spec
+func (s *StandaloneController) needsStatefulSetUpdate(redis *koncachev1alpha1.Redis, existing, desired *appsv1.StatefulSet) bool {
+	return s.hasBasicSpecChanges(existing, desired) || // Check basic spec differences
+		s.hasContainerChanges(existing, desired) || // Check container differences
+		s.hasMetadataChanges(existing, desired) // Check metadata differences
+}
+
+// hasBasicSpecChanges checks for basic StatefulSet spec changes
+func (s *StandaloneController) hasBasicSpecChanges(existing, desired *appsv1.StatefulSet) bool {
+	return *existing.Spec.Replicas != *desired.Spec.Replicas ||
+		existing.Spec.Template.Spec.ServiceAccountName != desired.Spec.Template.Spec.ServiceAccountName
+}
+
+// hasContainerChanges checks for container-related changes
+func (s *StandaloneController) hasContainerChanges(existing, desired *appsv1.StatefulSet) bool {
+	if len(existing.Spec.Template.Spec.Containers) == 0 || len(desired.Spec.Template.Spec.Containers) == 0 {
+		return len(existing.Spec.Template.Spec.Containers) != len(desired.Spec.Template.Spec.Containers)
+	}
+
+	existingContainer := &existing.Spec.Template.Spec.Containers[0]
+	desiredContainer := &desired.Spec.Template.Spec.Containers[0]
+
+	return existingContainer.Image != desiredContainer.Image || // Check image
+		s.hasResourceChanges(existingContainer, desiredContainer) || // Check resources
+		s.hasPortChanges(existingContainer, desiredContainer) // Check ports
+}
+
+// hasResourceChanges checks if container resources have changed
+func (s *StandaloneController) hasResourceChanges(existing, desired *corev1.Container) bool {
+	return !EqualResourceLists(existing.Resources.Requests, desired.Resources.Requests) ||
+		!EqualResourceLists(existing.Resources.Limits, desired.Resources.Limits)
+}
+
+// hasPortChanges checks if container ports have changed
+func (s *StandaloneController) hasPortChanges(existing, desired *corev1.Container) bool {
+	if len(existing.Ports) != len(desired.Ports) {
+		return true
+	}
+
+	for i, existingPort := range existing.Ports {
+		if i < len(desired.Ports) && existingPort.ContainerPort != desired.Ports[i].ContainerPort {
+			return true
+		}
+	}
+
+	return false
+}
+
+// hasMetadataChanges checks for metadata changes
+func (s *StandaloneController) hasMetadataChanges(existing, desired *appsv1.StatefulSet) bool {
+	return !EqualStringMaps(existing.Spec.Template.Spec.NodeSelector, desired.Spec.Template.Spec.NodeSelector) ||
+		!EqualStringMaps(existing.Spec.Template.Annotations, desired.Spec.Template.Annotations) ||
+		!EqualStringMaps(existing.Spec.Template.Labels, desired.Spec.Template.Labels) ||
+		!EqualStringMaps(existing.Labels, desired.Labels) ||
+		!EqualStringMaps(existing.Annotations, desired.Annotations) ||
+		!EqualTolerations(existing.Spec.Template.Spec.Tolerations, desired.Spec.Template.Spec.Tolerations)
 }
