@@ -19,6 +19,11 @@ import (
 	koncachev1alpha1 "github.com/GreedyKomodoDragon/redis-operator/api/v1alpha1"
 )
 
+const (
+	statefulSetNameField      = "StatefulSet.Name"
+	statefulSetNamespaceField = "StatefulSet.Namespace"
+)
+
 // StandaloneController handles the reconciliation of standalone Redis instances
 type StandaloneController struct {
 	client.Client
@@ -116,7 +121,7 @@ func (s *StandaloneController) reconcileStatefulSet(ctx context.Context, redis *
 	foundStatefulSet := &appsv1.StatefulSet{}
 	err := s.Get(ctx, types.NamespacedName{Name: statefulSet.Name, Namespace: statefulSet.Namespace}, foundStatefulSet)
 	if err != nil && errors.IsNotFound(err) {
-		log.Info("Creating a new StatefulSet", "StatefulSet.Namespace", statefulSet.Namespace, "StatefulSet.Name", statefulSet.Name)
+		log.Info("Creating a new StatefulSet", statefulSetNamespaceField, statefulSet.Namespace, statefulSetNameField, statefulSet.Name)
 		err = s.Create(ctx, statefulSet)
 		if err != nil {
 			return nil, false, err
@@ -128,12 +133,12 @@ func (s *StandaloneController) reconcileStatefulSet(ctx context.Context, redis *
 	}
 
 	if !s.needsStatefulSetUpdate(redis, foundStatefulSet, statefulSet) {
-		log.V(1).Info("StatefulSet is up-to-date, no changes needed", "StatefulSet.Name", foundStatefulSet.Name)
+		log.V(1).Info("StatefulSet is up-to-date, no changes needed", statefulSetNameField, foundStatefulSet.Name)
 		// No changes needed, return the existing StatefulSet and do not requeue
 		return foundStatefulSet, false, nil
 	}
 
-	log.Info("StatefulSet spec has changed, updating", "StatefulSet.Name", foundStatefulSet.Name)
+	log.Info("StatefulSet spec has changed, updating", statefulSetNameField, foundStatefulSet.Name)
 
 	// Update the existing StatefulSet with the new spec
 	foundStatefulSet.Spec = statefulSet.Spec
@@ -170,24 +175,50 @@ func (s *StandaloneController) serviceForRedis(redis *koncachev1alpha1.Redis) *c
 	labels := LabelsForRedis(redis.Name)
 	port := GetRedisPort(redis)
 
+	// Build service ports starting with Redis port
+	servicePorts := []corev1.ServicePort{
+		{
+			Name:       "redis",
+			Port:       port,
+			TargetPort: intstr.FromInt(int(port)),
+			Protocol:   corev1.ProtocolTCP,
+		},
+	}
+
+	// Add metrics port if monitoring is enabled
+	if IsMonitoringEnabled(redis) {
+		exporterPort := GetRedisExporterPort(redis)
+		servicePorts = append(servicePorts, corev1.ServicePort{
+			Name:       "metrics",
+			Port:       exporterPort,
+			TargetPort: intstr.FromInt(int(exporterPort)),
+			Protocol:   corev1.ProtocolTCP,
+		})
+	}
+
+	// Add prometheus.io annotations for metrics scraping if monitoring is enabled
+	annotations := make(map[string]string)
+	for k, v := range redis.Spec.ServiceAnnotations {
+		annotations[k] = v
+	}
+
+	if IsMonitoringEnabled(redis) {
+		annotations["prometheus.io/scrape"] = "true"
+		annotations["prometheus.io/port"] = fmt.Sprintf("%d", GetRedisExporterPort(redis))
+		annotations["prometheus.io/path"] = "/metrics"
+	}
+
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        redis.Name,
 			Namespace:   redis.Namespace,
 			Labels:      labels,
-			Annotations: redis.Spec.ServiceAnnotations,
+			Annotations: annotations,
 		},
 		Spec: corev1.ServiceSpec{
 			Type:     redis.Spec.ServiceType,
 			Selector: labels,
-			Ports: []corev1.ServicePort{
-				{
-					Name:       "redis",
-					Port:       port,
-					TargetPort: intstr.FromInt(int(port)),
-					Protocol:   corev1.ProtocolTCP,
-				},
-			},
+			Ports:    servicePorts,
 		},
 	}
 }
@@ -201,6 +232,15 @@ func (s *StandaloneController) statefulSetForRedis(redis *koncachev1alpha1.Redis
 	// Build container
 	container := BuildRedisContainer(redis, port)
 
+	// Build containers list starting with Redis container
+	containers := []corev1.Container{container}
+
+	// Add Redis exporter sidecar if monitoring is enabled
+	if IsMonitoringEnabled(redis) {
+		exporterContainer := BuildRedisExporterContainer(redis, port)
+		containers = append(containers, exporterContainer)
+	}
+
 	// Build pod template
 	podTemplate := corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
@@ -213,7 +253,7 @@ func (s *StandaloneController) statefulSetForRedis(redis *koncachev1alpha1.Redis
 			Tolerations:        redis.Spec.Tolerations,
 			Affinity:           redis.Spec.Affinity,
 			ImagePullSecrets:   redis.Spec.ImagePullSecrets,
-			Containers:         []corev1.Container{container},
+			Containers:         containers,
 			Volumes:            []corev1.Volume{BuildConfigMapVolume(redis.Name)},
 		},
 	}
@@ -252,12 +292,11 @@ func (s *StandaloneController) updateRedisStatus(ctx context.Context, redis *kon
 		// Update status based on StatefulSet status
 		currentRedis.Status.ObservedGeneration = currentRedis.Generation
 
-		if statefulSet.Status.ReadyReplicas == *statefulSet.Spec.Replicas {
+		currentRedis.Status.Ready = statefulSet.Status.ReadyReplicas == *statefulSet.Spec.Replicas
+		if currentRedis.Status.Ready {
 			currentRedis.Status.Phase = koncachev1alpha1.RedisPhaseRunning
-			currentRedis.Status.Ready = true
 		} else {
 			currentRedis.Status.Phase = koncachev1alpha1.RedisPhasePending
-			currentRedis.Status.Ready = false
 		}
 
 		// Set endpoint
@@ -333,16 +372,41 @@ func (s *StandaloneController) hasBasicSpecChanges(existing, desired *appsv1.Sta
 
 // hasContainerChanges checks for container-related changes
 func (s *StandaloneController) hasContainerChanges(existing, desired *appsv1.StatefulSet) bool {
-	if len(existing.Spec.Template.Spec.Containers) == 0 || len(desired.Spec.Template.Spec.Containers) == 0 {
-		return len(existing.Spec.Template.Spec.Containers) != len(desired.Spec.Template.Spec.Containers)
+	// Check if the number of containers has changed
+	if len(existing.Spec.Template.Spec.Containers) != len(desired.Spec.Template.Spec.Containers) {
+		return true
 	}
 
-	existingContainer := &existing.Spec.Template.Spec.Containers[0]
-	desiredContainer := &desired.Spec.Template.Spec.Containers[0]
+	// Check Redis container (always the first container)
+	if len(existing.Spec.Template.Spec.Containers) == 0 || len(desired.Spec.Template.Spec.Containers) == 0 {
+		return true
+	}
 
-	return existingContainer.Image != desiredContainer.Image || // Check image
-		s.hasResourceChanges(existingContainer, desiredContainer) || // Check resources
-		s.hasPortChanges(existingContainer, desiredContainer) // Check ports
+	existingRedisContainer := &existing.Spec.Template.Spec.Containers[0]
+	desiredRedisContainer := &desired.Spec.Template.Spec.Containers[0]
+
+	if s.hasContainerSpecChanges(existingRedisContainer, desiredRedisContainer) {
+		return true
+	}
+
+	// Check exporter container if it exists (always the second container if present)
+	if len(existing.Spec.Template.Spec.Containers) > 1 && len(desired.Spec.Template.Spec.Containers) > 1 {
+		existingExporterContainer := &existing.Spec.Template.Spec.Containers[1]
+		desiredExporterContainer := &desired.Spec.Template.Spec.Containers[1]
+
+		if s.hasContainerSpecChanges(existingExporterContainer, desiredExporterContainer) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// hasContainerSpecChanges checks if a specific container has changed
+func (s *StandaloneController) hasContainerSpecChanges(existing, desired *corev1.Container) bool {
+	return existing.Image != desired.Image || // Check image
+		s.hasResourceChanges(existing, desired) || // Check resources
+		s.hasPortChanges(existing, desired) // Check ports
 }
 
 // hasResourceChanges checks if container resources have changed
