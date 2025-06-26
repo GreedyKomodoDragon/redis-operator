@@ -132,7 +132,7 @@ func (s *StandaloneController) reconcileStatefulSet(ctx context.Context, redis *
 		return nil, false, err
 	}
 
-	if !s.needsStatefulSetUpdate(redis, foundStatefulSet, statefulSet) {
+	if !s.needsStatefulSetUpdate(foundStatefulSet, statefulSet) {
 		log.V(1).Info("StatefulSet is up-to-date, no changes needed", statefulSetNameField, foundStatefulSet.Name)
 		// No changes needed, return the existing StatefulSet and do not requeue
 		return foundStatefulSet, false, nil
@@ -358,7 +358,7 @@ func statusEqual(a, b *koncachev1alpha1.RedisStatus) bool {
 }
 
 // needsStatefulSetUpdate checks if the StatefulSet needs to be updated based on the Redis spec
-func (s *StandaloneController) needsStatefulSetUpdate(redis *koncachev1alpha1.Redis, existing, desired *appsv1.StatefulSet) bool {
+func (s *StandaloneController) needsStatefulSetUpdate(existing, desired *appsv1.StatefulSet) bool {
 	return s.hasBasicSpecChanges(existing, desired) || // Check basic spec differences
 		s.hasContainerChanges(existing, desired) || // Check container differences
 		s.hasMetadataChanges(existing, desired) // Check metadata differences
