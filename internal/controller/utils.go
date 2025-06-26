@@ -274,3 +274,81 @@ func GetRedisPort(redis *koncachev1alpha1.Redis) int32 {
 	}
 	return port
 }
+
+// GetRedisExporterPort returns the Redis exporter port, defaulting to 9121 if not specified
+func GetRedisExporterPort(redis *koncachev1alpha1.Redis) int32 {
+	port := redis.Spec.Monitoring.Exporter.Port
+	if port == 0 {
+		return 9121
+	}
+	return port
+}
+
+// GetRedisExporterImage returns the Redis exporter image, defaulting to oliver006/redis_exporter:latest if not specified
+func GetRedisExporterImage(redis *koncachev1alpha1.Redis) string {
+	image := redis.Spec.Monitoring.Exporter.Image
+	if image == "" {
+		return "oliver006/redis_exporter:latest"
+	}
+	return image
+}
+
+// BuildRedisExporterContainer builds the Redis exporter sidecar container specification
+func BuildRedisExporterContainer(redis *koncachev1alpha1.Redis, redisPort int32) corev1.Container {
+	exporterPort := GetRedisExporterPort(redis)
+	exporterImage := GetRedisExporterImage(redis)
+
+	container := corev1.Container{
+		Name:            "redis-exporter",
+		Image:           exporterImage,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		Ports: []corev1.ContainerPort{
+			{
+				ContainerPort: exporterPort,
+				Name:          "metrics",
+				Protocol:      corev1.ProtocolTCP,
+			},
+		},
+		Resources: redis.Spec.Monitoring.Exporter.Resources,
+		Env: []corev1.EnvVar{
+			{
+				Name:  "REDIS_ADDR",
+				Value: fmt.Sprintf("redis://localhost:%d", redisPort),
+			},
+		},
+	}
+
+	// Add liveness and readiness probes for the exporter
+	container.LivenessProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Path: "/health",
+				Port: intstr.FromInt(int(exporterPort)),
+			},
+		},
+		InitialDelaySeconds: 15,
+		PeriodSeconds:       20,
+		TimeoutSeconds:      5,
+		FailureThreshold:    3,
+	}
+
+	container.ReadinessProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Path: "/health",
+				Port: intstr.FromInt(int(exporterPort)),
+			},
+		},
+		InitialDelaySeconds: 5,
+		PeriodSeconds:       10,
+		TimeoutSeconds:      3,
+		FailureThreshold:    3,
+	}
+
+	return container
+}
+
+// IsMonitoringEnabled returns true if monitoring and exporter are enabled
+func IsMonitoringEnabled(redis *koncachev1alpha1.Redis) bool {
+	return redis.Spec.Monitoring.Enabled && redis.Spec.Monitoring.Exporter.Enabled
+}

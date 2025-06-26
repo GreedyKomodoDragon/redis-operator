@@ -1,19 +1,9 @@
 # VERSION defines the project version for the bundle.
-# Update this value when you upgrade the ve.PHONY: manifests
-manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
-	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
-
-.PHONY: helm-crd
-helm-crd: manifests ## Update Helm chart CRD template from generated CRDs.
-	@echo "Updating Helm chart CRD template..."
-	@echo "{{- if .Values.crd.install }}" > $(HELM_CHART_DIR)/templates/crd.yaml
-	@cat config/crd/bases/koncache.greedykomodo_redis.yaml >> $(HELM_CHART_DIR)/templates/crd.yaml
-	@echo "{{- end }}" >> $(HELM_CHART_DIR)/templates/crd.yaml
-	@echo "Helm chart CRD template updated successfully!"our project.
+# Update this value when you upgrade the version of your project.
 # To re-generate a bundle for another specific version without changing the standard setup, you can:
 # - use the VERSION as arg of the bundle target (e.g make bundle VERSION=0.0.2)
 # - use environment variables to overwrite this value (e.g export VERSION=0.0.2)
-VERSION ?= 0.0.1
+VERSION ?= 0.0.2
 
 # CHANNELS define the bundle channels used in the bundle.
 # Add a new line here if you would like to change its default config. (E.g CHANNELS = "candidate,fast,stable")
@@ -60,7 +50,7 @@ endif
 # This is useful for CI or a project to utilize a specific version of the operator-sdk toolkit.
 OPERATOR_SDK_VERSION ?= v1.40.0
 # Image URL to use all building/pushing image targets
-IMG ?= greedykomodo/redis-operator:latest
+IMG ?= greedykomodo/redis-operator:v$(VERSION)
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -214,6 +204,52 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 build-installer: manifests generate helm ## Generate a consolidated YAML with CRDs and deployment using Helm.
 	mkdir -p dist
 	$(HELM) template redis-operator $(HELM_CHART_DIR) --set operator.image.repository=$(shell echo ${IMG} | cut -d: -f1) --set operator.image.tag=$(shell echo ${IMG} | cut -d: -f2) > dist/install.yaml
+
+##@ Minikube Development
+
+.PHONY: minikube-load
+minikube-load: docker-build ## Build docker image and load it into minikube, replacing any existing image with the same tag.
+	@echo "Building and loading $(IMG) into minikube..."
+	@echo "Removing existing image from minikube if it exists..."
+	@minikube image rm $(IMG) 2>/dev/null || true
+	@echo "Saving docker image to tar file..."
+	@$(CONTAINER_TOOL) image save -o image.tar $(IMG)
+	@echo "Loading image into minikube..."
+	@minikube image load image.tar
+	@echo "Cleaning up tar file..."
+	@rm -f image.tar
+	@echo "Successfully loaded $(IMG) into minikube!"
+	@echo "Verifying image is loaded:"
+	@minikube image ls | grep $(shell echo $(IMG) | cut -d: -f1) || echo "Warning: Image verification failed"
+
+.PHONY: minikube-load-no-cache
+minikube-load-no-cache: ## Build docker image without cache and load it into minikube, replacing any existing image.
+	@echo "Building $(IMG) without cache and loading into minikube..."
+	@echo "Removing existing image from minikube if it exists..."
+	@minikube image rm $(IMG) 2>/dev/null || true
+	@echo "Building docker image without cache..."
+	@$(CONTAINER_TOOL) build --no-cache -t $(IMG) .
+	@echo "Saving docker image to tar file..."
+	@$(CONTAINER_TOOL) image save -o image.tar $(IMG)
+	@echo "Loading image into minikube..."
+	@minikube image load image.tar
+	@echo "Cleaning up tar file..."
+	@rm -f image.tar
+	@echo "Successfully loaded $(IMG) into minikube!"
+	@echo "Verifying image is loaded:"
+	@minikube image ls | grep $(shell echo $(IMG) | cut -d: -f1) || echo "Warning: Image verification failed"
+
+.PHONY: minikube-deploy
+minikube-deploy: minikube-load deploy ## Build, load image into minikube, and deploy the operator.
+	@echo "Redis operator deployed to minikube successfully!"
+	@echo "Check the deployment status with: kubectl get pods -n redis-operator-system"
+
+.PHONY: minikube-redeploy
+minikube-redeploy: minikube-load-no-cache ## Build without cache, load into minikube, and redeploy the operator.
+	@echo "Redeploying operator..."
+	$(HELM) upgrade --install redis-operator $(HELM_CHART_DIR) --namespace redis-operator-system --create-namespace --set operator.image.repository=$(shell echo ${IMG} | cut -d: -f1) --set operator.image.tag=$(shell echo ${IMG} | cut -d: -f2) --set operator.image.pullPolicy=Never
+	@echo "Redis operator redeployed to minikube successfully!"
+	@echo "Check the deployment status with: kubectl get pods -n redis-operator-system"
 
 ##@ Deployment
 
