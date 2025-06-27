@@ -11,6 +11,14 @@ import (
 	koncachev1alpha1 "github.com/GreedyKomodoDragon/redis-operator/api/v1alpha1"
 )
 
+// Constants for volume and mount names
+const (
+	RedisDataVolumeName   = "redis-data"
+	RedisConfigVolumeName = "redis-config"
+	TLSCertsVolumeName    = "tls-certs"
+	TLSCAVolumeName       = "tls-ca"
+)
+
 // LabelsForRedis returns the labels for selecting the resources
 func LabelsForRedis(name string) map[string]string {
 	return map[string]string{
@@ -70,11 +78,8 @@ func BuildRedisConfig(redis *koncachev1alpha1.Redis) string {
 		config += fmt.Sprintf("loglevel %s\n", redis.Spec.Config.LogLevel)
 	}
 
-	// Security
-	if redis.Spec.Security.RequireAuth != nil && *redis.Spec.Security.RequireAuth {
-		config += "protected-mode yes\n"
-		// Note: Password will be set via environment variable or secret
-	}
+	// Security configuration
+	config += BuildSecurityConfig(redis)
 
 	// Additional custom configuration
 	for key, value := range redis.Spec.Config.AdditionalConfig {
@@ -98,25 +103,41 @@ maxmemory-policy allkeys-lru
 
 // BuildRedisContainer builds the Redis container specification
 func BuildRedisContainer(redis *koncachev1alpha1.Redis, port int32) corev1.Container {
-	container := corev1.Container{
-		Name:            "redis",
-		Image:           redis.Spec.Image,
-		ImagePullPolicy: redis.Spec.ImagePullPolicy,
-		Ports: []corev1.ContainerPort{
+	// Build container ports based on TLS configuration
+	var containerPorts []corev1.ContainerPort
+	if IsTLSEnabled(redis) {
+		// When TLS is enabled, only expose the TLS port
+		containerPorts = []corev1.ContainerPort{
+			{
+				ContainerPort: 6380,
+				Name:          "redis-tls",
+				Protocol:      corev1.ProtocolTCP,
+			},
+		}
+	} else {
+		// When TLS is disabled, expose the regular Redis port
+		containerPorts = []corev1.ContainerPort{
 			{
 				ContainerPort: port,
 				Name:          "redis",
 				Protocol:      corev1.ProtocolTCP,
 			},
-		},
-		Resources: redis.Spec.Resources,
+		}
+	}
+
+	container := corev1.Container{
+		Name:            "redis",
+		Image:           redis.Spec.Image,
+		ImagePullPolicy: redis.Spec.ImagePullPolicy,
+		Ports:           containerPorts,
+		Resources:       redis.Spec.Resources,
 		VolumeMounts: []corev1.VolumeMount{
 			{
-				Name:      "redis-data",
+				Name:      RedisDataVolumeName,
 				MountPath: "/data",
 			},
 			{
-				Name:      "redis-config",
+				Name:      RedisConfigVolumeName,
 				MountPath: "/usr/local/etc/redis/redis.conf",
 				SubPath:   "redis.conf",
 				ReadOnly:  true,
@@ -126,30 +147,22 @@ func BuildRedisContainer(redis *koncachev1alpha1.Redis, port int32) corev1.Conta
 		Args:    []string{"/usr/local/etc/redis/redis.conf"},
 	}
 
-	// Add liveness and readiness probes
-	container.LivenessProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			TCPSocket: &corev1.TCPSocketAction{
-				Port: intstr.FromInt(int(port)),
-			},
-		},
-		InitialDelaySeconds: 30,
-		PeriodSeconds:       10,
-		TimeoutSeconds:      5,
-		FailureThreshold:    3,
+	// Add security environment variables
+	securityEnv := BuildSecurityEnvironment(redis)
+	if len(securityEnv) > 0 {
+		container.Env = append(container.Env, securityEnv...)
 	}
 
-	container.ReadinessProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			Exec: &corev1.ExecAction{
-				Command: []string{"redis-cli", "ping"},
-			},
-		},
-		InitialDelaySeconds: 5,
-		PeriodSeconds:       10,
-		TimeoutSeconds:      1,
-		FailureThreshold:    3,
+	// Add TLS volume mounts
+	tlsVolumeMounts := BuildTLSVolumeMounts(redis)
+	if len(tlsVolumeMounts) > 0 {
+		container.VolumeMounts = append(container.VolumeMounts, tlsVolumeMounts...)
 	}
+
+	// Add security-aware probes
+	livenessProbe, readinessProbe := BuildSecurityProbes(redis, port)
+	container.LivenessProbe = livenessProbe
+	container.ReadinessProbe = readinessProbe
 
 	return container
 }
@@ -168,7 +181,7 @@ func BuildVolumeClaimTemplate(redis *koncachev1alpha1.Redis) corev1.PersistentVo
 
 	return corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "redis-data",
+			Name: RedisDataVolumeName,
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{
 			AccessModes:      accessModes,
@@ -186,7 +199,7 @@ func BuildVolumeClaimTemplate(redis *koncachev1alpha1.Redis) corev1.PersistentVo
 // BuildConfigMapVolume creates a ConfigMap volume for Redis configuration
 func BuildConfigMapVolume(redisName string) corev1.Volume {
 	return corev1.Volume{
-		Name: "redis-config",
+		Name: RedisConfigVolumeName,
 		VolumeSource: corev1.VolumeSource{
 			ConfigMap: &corev1.ConfigMapVolumeSource{
 				LocalObjectReference: corev1.LocalObjectReference{
@@ -298,6 +311,14 @@ func BuildRedisExporterContainer(redis *koncachev1alpha1.Redis, redisPort int32)
 	exporterPort := GetRedisExporterPort(redis)
 	exporterImage := GetRedisExporterImage(redis)
 
+	// Build Redis connection URL based on security settings
+	var redisAddr string
+	if IsTLSEnabled(redis) {
+		redisAddr = "rediss://localhost:6380"
+	} else {
+		redisAddr = fmt.Sprintf("redis://localhost:%d", redisPort)
+	}
+
 	container := corev1.Container{
 		Name:            "redis-exporter",
 		Image:           exporterImage,
@@ -313,9 +334,51 @@ func BuildRedisExporterContainer(redis *koncachev1alpha1.Redis, redisPort int32)
 		Env: []corev1.EnvVar{
 			{
 				Name:  "REDIS_ADDR",
-				Value: fmt.Sprintf("redis://localhost:%d", redisPort),
+				Value: redisAddr,
 			},
 		},
+	}
+
+	// Add Redis password environment variable if auth is enabled
+	if IsAuthEnabled(redis) {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name: "REDIS_PASSWORD",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: GetPasswordSecretName(redis),
+					},
+					Key: GetPasswordSecretKey(redis),
+				},
+			},
+		})
+	}
+
+	// Add TLS configuration if TLS is enabled
+	if IsTLSEnabled(redis) {
+		// Mount TLS certificates
+		tlsVolumeMounts := BuildTLSVolumeMounts(redis)
+		if len(tlsVolumeMounts) > 0 {
+			container.VolumeMounts = append(container.VolumeMounts, tlsVolumeMounts...)
+		}
+
+		// Add TLS environment variables for redis_exporter
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "REDIS_EXPORTER_TLS_CLIENT_CERT_FILE",
+			Value: "/etc/redis/tls/tls.crt",
+		})
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "REDIS_EXPORTER_TLS_CLIENT_KEY_FILE",
+			Value: "/etc/redis/tls/tls.key",
+		})
+
+		// Add CA certificate if configured
+		if redis.Spec.Security.TLS.CASecret != "" {
+			container.Env = append(container.Env, corev1.EnvVar{
+				Name:  "REDIS_EXPORTER_TLS_CA_CERT_FILE",
+				Value: "/etc/redis/tls/ca.crt",
+			})
+		}
 	}
 
 	// Add liveness and readiness probes for the exporter
@@ -351,4 +414,324 @@ func BuildRedisExporterContainer(redis *koncachev1alpha1.Redis, redisPort int32)
 // IsMonitoringEnabled returns true if monitoring and exporter are enabled
 func IsMonitoringEnabled(redis *koncachev1alpha1.Redis) bool {
 	return redis.Spec.Monitoring.Enabled && redis.Spec.Monitoring.Exporter.Enabled
+}
+
+// Security utility functions
+
+// IsSecurityEnabled returns true if any security feature is enabled
+func IsSecurityEnabled(redis *koncachev1alpha1.Redis) bool {
+	return (redis.Spec.Security.RequireAuth != nil && *redis.Spec.Security.RequireAuth) ||
+		(redis.Spec.Security.TLS != nil && redis.Spec.Security.TLS.Enabled) ||
+		len(redis.Spec.Security.RenameCommands) > 0
+}
+
+// IsAuthEnabled returns true if authentication is enabled
+func IsAuthEnabled(redis *koncachev1alpha1.Redis) bool {
+	return redis.Spec.Security.RequireAuth != nil && *redis.Spec.Security.RequireAuth
+}
+
+// IsTLSEnabled returns true if TLS is enabled
+func IsTLSEnabled(redis *koncachev1alpha1.Redis) bool {
+	return redis.Spec.Security.TLS != nil && redis.Spec.Security.TLS.Enabled
+}
+
+// GetPasswordSecretName returns the secret name containing the Redis password
+func GetPasswordSecretName(redis *koncachev1alpha1.Redis) string {
+	if redis.Spec.Security.PasswordSecret != nil {
+		return redis.Spec.Security.PasswordSecret.Name
+	}
+	return redis.Name + "-auth"
+}
+
+// GetPasswordSecretKey returns the secret key containing the Redis password
+func GetPasswordSecretKey(redis *koncachev1alpha1.Redis) string {
+	if redis.Spec.Security.PasswordSecret != nil {
+		return redis.Spec.Security.PasswordSecret.Key
+	}
+	return "password"
+}
+
+// BuildSecurityConfig builds the security configuration for Redis
+func BuildSecurityConfig(redis *koncachev1alpha1.Redis) string {
+	config := ""
+
+	// Authentication configuration
+	config += buildAuthConfig(redis)
+
+	// TLS configuration
+	config += buildTLSConfig(redis)
+
+	// Command renaming for security
+	config += buildCommandRenameConfig(redis)
+
+	return config
+}
+
+// buildAuthConfig builds authentication configuration
+func buildAuthConfig(redis *koncachev1alpha1.Redis) string {
+	if IsAuthEnabled(redis) {
+		return "protected-mode yes\nrequirepass $REDIS_PASSWORD\n"
+	}
+	return "protected-mode no\n"
+}
+
+// buildTLSConfig builds TLS configuration
+func buildTLSConfig(redis *koncachev1alpha1.Redis) string {
+	if !IsTLSEnabled(redis) {
+		return ""
+	}
+
+	config := "tls-port 6380\nport 0\n" // Disable non-TLS port
+
+	// Certificate files
+	if redis.Spec.Security.TLS.CertFile != "" {
+		config += fmt.Sprintf("tls-cert-file %s\n", redis.Spec.Security.TLS.CertFile)
+	} else {
+		config += "tls-cert-file /etc/redis/tls/tls.crt\n"
+	}
+
+	if redis.Spec.Security.TLS.KeyFile != "" {
+		config += fmt.Sprintf("tls-key-file %s\n", redis.Spec.Security.TLS.KeyFile)
+	} else {
+		config += "tls-key-file /etc/redis/tls/tls.key\n"
+	}
+
+	// CA certificate
+	if redis.Spec.Security.TLS.CAFile != "" {
+		config += fmt.Sprintf("tls-ca-cert-file %s\n", redis.Spec.Security.TLS.CAFile)
+	} else if redis.Spec.Security.TLS.CASecret != "" {
+		config += "tls-ca-cert-file /etc/redis/tls/ca.crt\n"
+	}
+
+	// TLS security settings
+	config += "tls-auth-clients yes\ntls-protocols \"TLSv1.2 TLSv1.3\"\n"
+
+	return config
+}
+
+// buildCommandRenameConfig builds command renaming configuration
+func buildCommandRenameConfig(redis *koncachev1alpha1.Redis) string {
+	config := ""
+	for oldCmd, newCmd := range redis.Spec.Security.RenameCommands {
+		if newCmd == "" {
+			config += fmt.Sprintf("rename-command %s \"\"\n", oldCmd)
+		} else {
+			config += fmt.Sprintf("rename-command %s %s\n", oldCmd, newCmd)
+		}
+	}
+	return config
+}
+
+// BuildSecurityEnvironment builds environment variables for security
+func BuildSecurityEnvironment(redis *koncachev1alpha1.Redis) []corev1.EnvVar {
+	var envVars []corev1.EnvVar
+
+	// Add Redis password from secret
+	if IsAuthEnabled(redis) {
+		envVars = append(envVars, corev1.EnvVar{
+			Name: "REDIS_PASSWORD",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: GetPasswordSecretName(redis),
+					},
+					Key: GetPasswordSecretKey(redis),
+				},
+			},
+		})
+	}
+
+	return envVars
+}
+
+// BuildTLSVolumeMounts builds volume mounts for TLS certificates
+func BuildTLSVolumeMounts(redis *koncachev1alpha1.Redis) []corev1.VolumeMount {
+	var volumeMounts []corev1.VolumeMount
+
+	if IsTLSEnabled(redis) {
+		// TLS certificate volume mount
+		if redis.Spec.Security.TLS.CertSecret != "" {
+			volumeMounts = append(volumeMounts, corev1.VolumeMount{
+				Name:      TLSCertsVolumeName,
+				MountPath: "/etc/redis/tls",
+				ReadOnly:  true,
+			})
+		}
+
+		// CA certificate volume mount (if different from cert secret)
+		if redis.Spec.Security.TLS.CASecret != "" &&
+			redis.Spec.Security.TLS.CASecret != redis.Spec.Security.TLS.CertSecret {
+			volumeMounts = append(volumeMounts, corev1.VolumeMount{
+				Name:      TLSCAVolumeName,
+				MountPath: "/etc/redis/tls-ca",
+				ReadOnly:  true,
+			})
+		}
+	}
+
+	return volumeMounts
+}
+
+// BuildTLSVolumes builds volumes for TLS certificates
+func BuildTLSVolumes(redis *koncachev1alpha1.Redis) []corev1.Volume {
+	var volumes []corev1.Volume
+
+	if IsTLSEnabled(redis) {
+		// TLS certificate volume
+		if redis.Spec.Security.TLS.CertSecret != "" {
+			volumes = append(volumes, corev1.Volume{
+				Name: TLSCertsVolumeName,
+				VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{
+						SecretName: redis.Spec.Security.TLS.CertSecret,
+						Items: []corev1.KeyToPath{
+							{
+								Key:  "tls.crt",
+								Path: "tls.crt",
+							},
+							{
+								Key:  "tls.key",
+								Path: "tls.key",
+							},
+						},
+					},
+				},
+			})
+		}
+
+		// CA certificate volume (if different from cert secret)
+		if redis.Spec.Security.TLS.CASecret != "" &&
+			redis.Spec.Security.TLS.CASecret != redis.Spec.Security.TLS.CertSecret {
+			volumes = append(volumes, corev1.Volume{
+				Name: TLSCAVolumeName,
+				VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{
+						SecretName: redis.Spec.Security.TLS.CASecret,
+						Items: []corev1.KeyToPath{
+							{
+								Key:  "ca.crt",
+								Path: "ca.crt",
+							},
+						},
+					},
+				},
+			})
+		}
+	}
+
+	return volumes
+}
+
+// BuildSecurityProbes builds health probes that work with security settings
+func BuildSecurityProbes(redis *koncachev1alpha1.Redis, port int32) (*corev1.Probe, *corev1.Probe) {
+	var livenessProbe, readinessProbe *corev1.Probe
+
+	if IsTLSEnabled(redis) {
+		// For TLS, use TCP socket probe since redis-cli might not support TLS
+		livenessProbe = &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				TCPSocket: &corev1.TCPSocketAction{
+					Port: intstr.FromInt(6380), // TLS port
+				},
+			},
+			InitialDelaySeconds: 30,
+			PeriodSeconds:       10,
+			TimeoutSeconds:      5,
+			FailureThreshold:    3,
+		}
+
+		readinessProbe = &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				TCPSocket: &corev1.TCPSocketAction{
+					Port: intstr.FromInt(6380), // TLS port
+				},
+			},
+			InitialDelaySeconds: 5,
+			PeriodSeconds:       10,
+			TimeoutSeconds:      1,
+			FailureThreshold:    3,
+		}
+	} else if IsAuthEnabled(redis) {
+		// For auth-enabled Redis, use authenticated ping
+		livenessProbe = &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				Exec: &corev1.ExecAction{
+					Command: []string{
+						"sh", "-c",
+						"redis-cli -a $REDIS_PASSWORD ping | grep PONG",
+					},
+				},
+			},
+			InitialDelaySeconds: 30,
+			PeriodSeconds:       10,
+			TimeoutSeconds:      5,
+			FailureThreshold:    3,
+		}
+
+		readinessProbe = &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				Exec: &corev1.ExecAction{
+					Command: []string{
+						"sh", "-c",
+						"redis-cli -a $REDIS_PASSWORD ping | grep PONG",
+					},
+				},
+			},
+			InitialDelaySeconds: 5,
+			PeriodSeconds:       10,
+			TimeoutSeconds:      1,
+			FailureThreshold:    3,
+		}
+	} else {
+		// Standard probes for non-secured Redis
+		livenessProbe = &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				TCPSocket: &corev1.TCPSocketAction{
+					Port: intstr.FromInt(int(port)),
+				},
+			},
+			InitialDelaySeconds: 30,
+			PeriodSeconds:       10,
+			TimeoutSeconds:      5,
+			FailureThreshold:    3,
+		}
+
+		readinessProbe = &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				Exec: &corev1.ExecAction{
+					Command: []string{"redis-cli", "ping"},
+				},
+			},
+			InitialDelaySeconds: 5,
+			PeriodSeconds:       10,
+			TimeoutSeconds:      1,
+			FailureThreshold:    3,
+		}
+	}
+
+	return livenessProbe, readinessProbe
+}
+
+// buildVolumes builds all volumes needed for the Redis pod including config and TLS
+func buildVolumes(redis *koncachev1alpha1.Redis) []corev1.Volume {
+	volumes := []corev1.Volume{
+		{
+			Name: RedisConfigVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: redis.Name + "-config",
+					},
+				},
+			},
+		},
+	}
+
+	// Add TLS volumes if TLS is enabled
+	tlsVolumes := BuildTLSVolumes(redis)
+	if len(tlsVolumes) > 0 {
+		volumes = append(volumes, tlsVolumes...)
+	}
+
+	return volumes
 }

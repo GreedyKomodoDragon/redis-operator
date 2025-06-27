@@ -14,7 +14,29 @@ import (
 	"github.com/GreedyKomodoDragon/redis-operator/internal/controller"
 )
 
-const testRedisExporterImage = "oliver006/redis_exporter:v1.45.0"
+// Test constants to avoid duplication
+const (
+	testRedisExporterImage = "oliver006/redis_exporter:v1.45.0"
+	testRedisName          = "my-redis"
+	testRedisClusterName   = "redis-cluster-prod"
+	testRedisInstance      = "test-redis"
+	testTLSCertsSecret     = "tls-certs"
+
+	// Label constants
+	testAppNameLabel     = "app.kubernetes.io/name"
+	testAppInstanceLabel = "app.kubernetes.io/instance"
+	testAppPartOfLabel   = "app.kubernetes.io/part-of"
+	testRedisValue       = "redis"
+	testOperatorValue    = "redis-operator"
+
+	// Volume constants
+	testDataVolume   = "redis-data"
+	testConfigVolume = "redis-config"
+
+	// Test case names
+	testAuthEnabledCase = "auth enabled"
+	testTLSEnabledCase  = "TLS enabled"
+)
 
 func TestLabelsForRedis(t *testing.T) {
 	tests := []struct {
@@ -24,20 +46,20 @@ func TestLabelsForRedis(t *testing.T) {
 	}{
 		{
 			name:      "basic redis name",
-			redisName: "my-redis",
+			redisName: testRedisName,
 			expected: map[string]string{
-				"app.kubernetes.io/name":     "redis",
-				"app.kubernetes.io/instance": "my-redis",
-				"app.kubernetes.io/part-of":  "redis-operator",
+				testAppNameLabel:     testRedisValue,
+				testAppInstanceLabel: testRedisName,
+				testAppPartOfLabel:   testOperatorValue,
 			},
 		},
 		{
 			name:      "redis name with hyphens",
-			redisName: "redis-cluster-prod",
+			redisName: testRedisClusterName,
 			expected: map[string]string{
-				"app.kubernetes.io/name":     "redis",
-				"app.kubernetes.io/instance": "redis-cluster-prod",
-				"app.kubernetes.io/part-of":  "redis-operator",
+				testAppNameLabel:     testRedisValue,
+				testAppInstanceLabel: testRedisClusterName,
+				testAppPartOfLabel:   testOperatorValue,
 			},
 		},
 	}
@@ -61,9 +83,9 @@ func TestLabelsForRedisCluster(t *testing.T) {
 			name:      "cluster labels",
 			redisName: "my-cluster",
 			expected: map[string]string{
-				"app.kubernetes.io/name":      "redis",
-				"app.kubernetes.io/instance":  "my-cluster",
-				"app.kubernetes.io/part-of":   "redis-operator",
+				testAppNameLabel:              testRedisValue,
+				testAppInstanceLabel:          "my-cluster",
+				testAppPartOfLabel:            testOperatorValue,
 				"app.kubernetes.io/component": "cluster",
 			},
 		},
@@ -88,9 +110,9 @@ func TestLabelsForRedisSentinel(t *testing.T) {
 			name:      "sentinel labels",
 			redisName: "my-sentinel",
 			expected: map[string]string{
-				"app.kubernetes.io/name":      "redis",
-				"app.kubernetes.io/instance":  "my-sentinel",
-				"app.kubernetes.io/part-of":   "redis-operator",
+				testAppNameLabel:              testRedisValue,
+				testAppInstanceLabel:          "my-sentinel",
+				testAppPartOfLabel:            testOperatorValue,
 				"app.kubernetes.io/component": "sentinel",
 			},
 		},
@@ -267,11 +289,12 @@ func TestBuildRedisContainer(t *testing.T) {
 
 			// Test port configuration
 			require.Len(t, result.Ports, 1, "Container should have exactly 1 port")
+			// For basic Redis without TLS, should have the configured port
 			assert.Equal(t, tt.port, result.Ports[0].ContainerPort)
 			assert.Equal(t, "redis", result.Ports[0].Name)
 
 			// Test volume mounts
-			expectedVolumeMountNames := []string{"redis-data", "redis-config"}
+			expectedVolumeMountNames := []string{testDataVolume, testConfigVolume}
 			assert.Len(t, result.VolumeMounts, len(expectedVolumeMountNames), "Container should have expected number of volume mounts")
 
 			// Verify mount names exist
@@ -312,7 +335,7 @@ func TestBuildVolumeClaimTemplate(t *testing.T) {
 			},
 			expected: corev1.PersistentVolumeClaim{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "redis-data",
+					Name: testDataVolume,
 				},
 				Spec: corev1.PersistentVolumeClaimSpec{
 					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
@@ -337,7 +360,7 @@ func TestBuildVolumeClaimTemplate(t *testing.T) {
 			},
 			expected: corev1.PersistentVolumeClaim{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "redis-data",
+					Name: testDataVolume,
 				},
 				Spec: corev1.PersistentVolumeClaimSpec{
 					AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
@@ -379,9 +402,9 @@ func TestBuildConfigMapVolume(t *testing.T) {
 	}{
 		{
 			name:      "basic configmap volume",
-			redisName: "my-redis",
+			redisName: testRedisName,
 			expected: corev1.Volume{
-				Name: "redis-config",
+				Name: testConfigVolume,
 				VolumeSource: corev1.VolumeSource{
 					ConfigMap: &corev1.ConfigMapVolumeSource{
 						LocalObjectReference: corev1.LocalObjectReference{
@@ -393,9 +416,9 @@ func TestBuildConfigMapVolume(t *testing.T) {
 		},
 		{
 			name:      "configmap volume with complex name",
-			redisName: "redis-cluster-prod",
+			redisName: testRedisClusterName,
 			expected: corev1.Volume{
-				Name: "redis-config",
+				Name: testConfigVolume,
 				VolumeSource: corev1.VolumeSource{
 					ConfigMap: &corev1.ConfigMapVolumeSource{
 						LocalObjectReference: corev1.LocalObjectReference{
@@ -937,6 +960,70 @@ func TestBuildRedisExporterContainer(t *testing.T) {
 	}
 }
 
+func TestBuildRedisExporterContainerWithTLS(t *testing.T) {
+	redis := &koncachev1alpha1.Redis{
+		Spec: koncachev1alpha1.RedisSpec{
+			Monitoring: koncachev1alpha1.RedisMonitoring{
+				Exporter: koncachev1alpha1.RedisExporter{
+					Image: testRedisExporterImage,
+					Port:  9121,
+				},
+			},
+			Security: koncachev1alpha1.RedisSecurity{
+				TLS: &koncachev1alpha1.RedisTLS{
+					Enabled:    true,
+					CertSecret: testTLSCertsSecret,
+				},
+			},
+		},
+	}
+
+	result := controller.BuildRedisExporterContainer(redis, 6379)
+
+	// Test basic properties
+	assert.Equal(t, "redis-exporter", result.Name)
+	assert.Equal(t, testRedisExporterImage, result.Image)
+
+	// Test REDIS_ADDR environment variable uses TLS
+	redisAddrFound := false
+	for _, env := range result.Env {
+		if env.Name == "REDIS_ADDR" {
+			redisAddrFound = true
+			assert.Equal(t, "rediss://localhost:6380", env.Value)
+			break
+		}
+	}
+	assert.True(t, redisAddrFound, "REDIS_ADDR environment variable should be present")
+
+	// Test TLS environment variables
+	tlsCertFound := false
+	tlsKeyFound := false
+	for _, env := range result.Env {
+		if env.Name == "REDIS_EXPORTER_TLS_CLIENT_CERT_FILE" {
+			tlsCertFound = true
+			assert.Equal(t, "/etc/redis/tls/tls.crt", env.Value)
+		}
+		if env.Name == "REDIS_EXPORTER_TLS_CLIENT_KEY_FILE" {
+			tlsKeyFound = true
+			assert.Equal(t, "/etc/redis/tls/tls.key", env.Value)
+		}
+	}
+	assert.True(t, tlsCertFound, "TLS cert file environment variable should be present when TLS is enabled")
+	assert.True(t, tlsKeyFound, "TLS key file environment variable should be present when TLS is enabled")
+
+	// Test TLS volume mounts
+	tlsVolumeMountFound := false
+	for _, mount := range result.VolumeMounts {
+		if mount.Name == controller.TLSCertsVolumeName {
+			tlsVolumeMountFound = true
+			assert.Equal(t, "/etc/redis/tls", mount.MountPath)
+			assert.True(t, mount.ReadOnly)
+			break
+		}
+	}
+	assert.True(t, tlsVolumeMountFound, "TLS volume mount should be present when TLS is enabled")
+}
+
 func TestIsMonitoringEnabled(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1005,6 +1092,451 @@ func TestIsMonitoringEnabled(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := controller.IsMonitoringEnabled(tt.redis)
 			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// Security-related tests
+
+func TestIsSecurityEnabled(t *testing.T) {
+	tests := []struct {
+		name     string
+		redis    *koncachev1alpha1.Redis
+		expected bool
+	}{
+		{
+			name: "no security enabled",
+			redis: &koncachev1alpha1.Redis{
+				Spec: koncachev1alpha1.RedisSpec{},
+			},
+			expected: false,
+		},
+		{
+			name: testAuthEnabledCase,
+			redis: &koncachev1alpha1.Redis{
+				Spec: koncachev1alpha1.RedisSpec{
+					Security: koncachev1alpha1.RedisSecurity{
+						RequireAuth: &[]bool{true}[0],
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: testTLSEnabledCase,
+			redis: &koncachev1alpha1.Redis{
+				Spec: koncachev1alpha1.RedisSpec{
+					Security: koncachev1alpha1.RedisSecurity{
+						TLS: &koncachev1alpha1.RedisTLS{
+							Enabled: true,
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "command renaming enabled",
+			redis: &koncachev1alpha1.Redis{
+				Spec: koncachev1alpha1.RedisSpec{
+					Security: koncachev1alpha1.RedisSecurity{
+						RenameCommands: map[string]string{
+							"FLUSHALL": "SECURE_FLUSHALL",
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := controller.IsSecurityEnabled(tt.redis)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestIsTLSEnabled(t *testing.T) {
+	tests := []struct {
+		name     string
+		redis    *koncachev1alpha1.Redis
+		expected bool
+	}{
+		{
+			name: "TLS not configured",
+			redis: &koncachev1alpha1.Redis{
+				Spec: koncachev1alpha1.RedisSpec{},
+			},
+			expected: false,
+		},
+		{
+			name: "TLS disabled",
+			redis: &koncachev1alpha1.Redis{
+				Spec: koncachev1alpha1.RedisSpec{
+					Security: koncachev1alpha1.RedisSecurity{
+						TLS: &koncachev1alpha1.RedisTLS{
+							Enabled: false,
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: testTLSEnabledCase,
+			redis: &koncachev1alpha1.Redis{
+				Spec: koncachev1alpha1.RedisSpec{
+					Security: koncachev1alpha1.RedisSecurity{
+						TLS: &koncachev1alpha1.RedisTLS{
+							Enabled: true,
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := controller.IsTLSEnabled(tt.redis)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestIsAuthEnabled(t *testing.T) {
+	tests := []struct {
+		name     string
+		redis    *koncachev1alpha1.Redis
+		expected bool
+	}{
+		{
+			name: "auth not configured",
+			redis: &koncachev1alpha1.Redis{
+				Spec: koncachev1alpha1.RedisSpec{},
+			},
+			expected: false,
+		},
+		{
+			name: "auth disabled",
+			redis: &koncachev1alpha1.Redis{
+				Spec: koncachev1alpha1.RedisSpec{
+					Security: koncachev1alpha1.RedisSecurity{
+						RequireAuth: &[]bool{false}[0],
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: testAuthEnabledCase,
+			redis: &koncachev1alpha1.Redis{
+				Spec: koncachev1alpha1.RedisSpec{
+					Security: koncachev1alpha1.RedisSecurity{
+						RequireAuth: &[]bool{true}[0],
+					},
+				},
+			},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := controller.IsAuthEnabled(tt.redis)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestGetPasswordSecretName(t *testing.T) {
+	tests := []struct {
+		name     string
+		redis    *koncachev1alpha1.Redis
+		expected string
+	}{
+		{
+			name: "no password secret configured",
+			redis: &koncachev1alpha1.Redis{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: testRedisInstance,
+				},
+				Spec: koncachev1alpha1.RedisSpec{},
+			},
+			expected: "test-redis-auth",
+		},
+		{
+			name: "custom password secret configured",
+			redis: &koncachev1alpha1.Redis{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: testRedisInstance,
+				},
+				Spec: koncachev1alpha1.RedisSpec{
+					Security: koncachev1alpha1.RedisSecurity{
+						PasswordSecret: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: "custom-secret",
+							},
+							Key: "password",
+						},
+					},
+				},
+			},
+			expected: "custom-secret",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := controller.GetPasswordSecretName(tt.redis)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestBuildSecurityConfig(t *testing.T) {
+	tests := []struct {
+		name     string
+		redis    *koncachev1alpha1.Redis
+		contains []string
+	}{
+		{
+			name: "no security",
+			redis: &koncachev1alpha1.Redis{
+				Spec: koncachev1alpha1.RedisSpec{},
+			},
+			contains: []string{"protected-mode no"},
+		},
+		{
+			name: testAuthEnabledCase,
+			redis: &koncachev1alpha1.Redis{
+				Spec: koncachev1alpha1.RedisSpec{
+					Security: koncachev1alpha1.RedisSecurity{
+						RequireAuth: &[]bool{true}[0],
+					},
+				},
+			},
+			contains: []string{
+				"protected-mode yes",
+				"requirepass $REDIS_PASSWORD",
+			},
+		},
+		{
+			name: testTLSEnabledCase,
+			redis: &koncachev1alpha1.Redis{
+				Spec: koncachev1alpha1.RedisSpec{
+					Security: koncachev1alpha1.RedisSecurity{
+						TLS: &koncachev1alpha1.RedisTLS{
+							Enabled: true,
+						},
+					},
+				},
+			},
+			contains: []string{
+				"tls-port 6380",
+				"port 0",
+				"tls-cert-file /etc/redis/tls/tls.crt",
+				"tls-key-file /etc/redis/tls/tls.key",
+				"tls-auth-clients yes",
+			},
+		},
+		{
+			name: "command renaming",
+			redis: &koncachev1alpha1.Redis{
+				Spec: koncachev1alpha1.RedisSpec{
+					Security: koncachev1alpha1.RedisSecurity{
+						RenameCommands: map[string]string{
+							"FLUSHALL": "SECURE_FLUSHALL",
+							"DEBUG":    "",
+						},
+					},
+				},
+			},
+			contains: []string{
+				"rename-command FLUSHALL SECURE_FLUSHALL",
+				"rename-command DEBUG \"\"",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := controller.BuildSecurityConfig(tt.redis)
+			for _, expectedSubstring := range tt.contains {
+				assert.Contains(t, result, expectedSubstring)
+			}
+		})
+	}
+}
+
+func TestBuildSecurityEnvironment(t *testing.T) {
+	tests := []struct {
+		name     string
+		redis    *koncachev1alpha1.Redis
+		expected int
+	}{
+		{
+			name: "no auth",
+			redis: &koncachev1alpha1.Redis{
+				Spec: koncachev1alpha1.RedisSpec{},
+			},
+			expected: 0,
+		},
+		{
+			name: testAuthEnabledCase,
+			redis: &koncachev1alpha1.Redis{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: testRedisInstance,
+				},
+				Spec: koncachev1alpha1.RedisSpec{
+					Security: koncachev1alpha1.RedisSecurity{
+						RequireAuth: &[]bool{true}[0],
+					},
+				},
+			},
+			expected: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := controller.BuildSecurityEnvironment(tt.redis)
+			assert.Len(t, result, tt.expected)
+
+			if tt.expected > 0 {
+				assert.Equal(t, "REDIS_PASSWORD", result[0].Name)
+				assert.NotNil(t, result[0].ValueFrom)
+				assert.NotNil(t, result[0].ValueFrom.SecretKeyRef)
+			}
+		})
+	}
+}
+
+func TestBuildTLSVolumes(t *testing.T) {
+	tests := []struct {
+		name     string
+		redis    *koncachev1alpha1.Redis
+		expected int
+	}{
+		{
+			name: "TLS disabled",
+			redis: &koncachev1alpha1.Redis{
+				Spec: koncachev1alpha1.RedisSpec{},
+			},
+			expected: 0,
+		},
+		{
+			name: "TLS enabled with cert secret",
+			redis: &koncachev1alpha1.Redis{
+				Spec: koncachev1alpha1.RedisSpec{
+					Security: koncachev1alpha1.RedisSecurity{
+						TLS: &koncachev1alpha1.RedisTLS{
+							Enabled:    true,
+							CertSecret: testTLSCertsSecret,
+						},
+					},
+				},
+			},
+			expected: 1,
+		},
+		{
+			name: "TLS enabled with separate CA secret",
+			redis: &koncachev1alpha1.Redis{
+				Spec: koncachev1alpha1.RedisSpec{
+					Security: koncachev1alpha1.RedisSecurity{
+						TLS: &koncachev1alpha1.RedisTLS{
+							Enabled:    true,
+							CertSecret: testTLSCertsSecret,
+							CASecret:   "ca-certs",
+						},
+					},
+				},
+			},
+			expected: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := controller.BuildTLSVolumes(tt.redis)
+			assert.Len(t, result, tt.expected)
+		})
+	}
+}
+
+func TestBuildRedisContainerWithSecurity(t *testing.T) {
+	tests := []struct {
+		name      string
+		redis     *koncachev1alpha1.Redis
+		checkFunc func(*testing.T, corev1.Container)
+	}{
+		{
+			name: "container with auth",
+			redis: &koncachev1alpha1.Redis{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: testRedisInstance,
+				},
+				Spec: koncachev1alpha1.RedisSpec{
+					Image: "redis:7.2",
+					Security: koncachev1alpha1.RedisSecurity{
+						RequireAuth: &[]bool{true}[0],
+					},
+				},
+			},
+			checkFunc: func(t *testing.T, container corev1.Container) {
+				assert.Len(t, container.Env, 1)
+				assert.Equal(t, "REDIS_PASSWORD", container.Env[0].Name)
+			},
+		},
+		{
+			name: "container with TLS",
+			redis: &koncachev1alpha1.Redis{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: testRedisInstance,
+				},
+				Spec: koncachev1alpha1.RedisSpec{
+					Image: "redis:7.2",
+					Security: koncachev1alpha1.RedisSecurity{
+						TLS: &koncachev1alpha1.RedisTLS{
+							Enabled:    true,
+							CertSecret: testTLSCertsSecret,
+						},
+					},
+				},
+			},
+			checkFunc: func(t *testing.T, container corev1.Container) {
+				// Should have exactly 1 port (TLS port only)
+				require.Len(t, container.Ports, 1, "Container should have exactly 1 port when TLS is enabled")
+
+				// Should have TLS port
+				assert.Equal(t, "redis-tls", container.Ports[0].Name)
+				assert.Equal(t, int32(6380), container.Ports[0].ContainerPort)
+
+				// Should NOT have regular Redis port
+				for _, port := range container.Ports {
+					assert.NotEqual(t, "redis", port.Name, "Should not have regular redis port when TLS is enabled")
+				}
+
+				// Should have TLS volume mount
+				found := false
+				for _, mount := range container.VolumeMounts {
+					if mount.Name == controller.TLSCertsVolumeName {
+						found = true
+						break
+					}
+				}
+				assert.True(t, found, "Should have TLS volume mount")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			container := controller.BuildRedisContainer(tt.redis, 6379)
+			tt.checkFunc(t, container)
 		})
 	}
 }

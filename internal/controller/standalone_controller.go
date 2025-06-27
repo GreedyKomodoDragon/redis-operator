@@ -255,14 +255,24 @@ func (s *StandaloneController) serviceForRedis(redis *koncachev1alpha1.Redis) *c
 	labels := LabelsForRedis(redis.Name)
 	port := GetRedisPort(redis)
 
-	// Build service ports starting with Redis port
-	servicePorts := []corev1.ServicePort{
-		{
+	// Build service ports
+	var servicePorts []corev1.ServicePort
+
+	// If TLS is enabled, only expose TLS port, otherwise expose regular Redis port
+	if IsTLSEnabled(redis) {
+		servicePorts = append(servicePorts, corev1.ServicePort{
+			Name:       "redis-tls",
+			Port:       6380,
+			TargetPort: intstr.FromInt(6380),
+			Protocol:   corev1.ProtocolTCP,
+		})
+	} else {
+		servicePorts = append(servicePorts, corev1.ServicePort{
 			Name:       "redis",
 			Port:       port,
 			TargetPort: intstr.FromInt(int(port)),
 			Protocol:   corev1.ProtocolTCP,
-		},
+		})
 	}
 
 	// Add metrics port if monitoring is enabled
@@ -334,7 +344,7 @@ func (s *StandaloneController) statefulSetForRedis(redis *koncachev1alpha1.Redis
 			Affinity:           redis.Spec.Affinity,
 			ImagePullSecrets:   redis.Spec.ImagePullSecrets,
 			Containers:         containers,
-			Volumes:            []corev1.Volume{BuildConfigMapVolume(redis.Name)},
+			Volumes:            buildVolumes(redis),
 		},
 	}
 
