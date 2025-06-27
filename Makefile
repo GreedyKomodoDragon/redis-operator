@@ -101,7 +101,7 @@ manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and Cust
 	@echo "Updating Helm chart CRD template..."
 	@cp config/crd/bases/koncache.greedykomodo_redis.yaml $(HELM_CHART_DIR)/templates/crd-raw.yaml
 	@echo "{{- if .Values.crd.install }}" > $(HELM_CHART_DIR)/templates/crd.yaml
-	@cat $(HELM_CHART_DIR)/templates/crd-raw.yaml | sed 's/^/  /' >> $(HELM_CHART_DIR)/templates/crd.yaml
+	@cat $(HELM_CHART_DIR)/templates/crd-raw.yaml >> $(HELM_CHART_DIR)/templates/crd.yaml
 	@echo "{{- end }}" >> $(HELM_CHART_DIR)/templates/crd.yaml
 	@rm $(HELM_CHART_DIR)/templates/crd-raw.yaml
 	@echo "Helm chart CRD template updated successfully!"

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -54,6 +55,20 @@ func (s *StandaloneController) Reconcile(ctx context.Context, redis *koncachev1a
 		return ctrl.Result{}, err
 	}
 
+	// Create or update ServiceMonitor if monitoring is enabled
+	if IsMonitoringEnabled(redis) {
+		if err := s.reconcileServiceMonitor(ctx, redis); err != nil {
+			log.Error(err, "Failed to reconcile ServiceMonitor")
+			return ctrl.Result{}, err
+		}
+	} else {
+		// Clean up ServiceMonitor if it exists but monitoring is disabled
+		if err := s.cleanupServiceMonitor(ctx, redis); err != nil {
+			log.Error(err, "Failed to cleanup ServiceMonitor")
+			return ctrl.Result{}, err
+		}
+	}
+
 	// Create or update StatefulSet
 	statefulSet, requeue, err := s.reconcileStatefulSet(ctx, redis)
 	if err != nil {
@@ -71,6 +86,71 @@ func (s *StandaloneController) Reconcile(ctx context.Context, redis *koncachev1a
 	}
 
 	return ctrl.Result{}, nil
+}
+
+func (s *StandaloneController) reconcileServiceMonitor(ctx context.Context, redis *koncachev1alpha1.Redis) error {
+	log := logf.FromContext(ctx)
+
+	serviceMonitor := s.serviceMonitorForRedis(redis)
+	if err := controllerutil.SetControllerReference(redis, serviceMonitor, s.Scheme); err != nil {
+		return err
+	}
+
+	foundServiceMonitor := &monitoringv1.ServiceMonitor{}
+	err := s.Get(ctx, types.NamespacedName{Name: serviceMonitor.Name, Namespace: serviceMonitor.Namespace}, foundServiceMonitor)
+	if err != nil && errors.IsNotFound(err) {
+		log.Info("Creating a new ServiceMonitor", "ServiceMonitor.Namespace", serviceMonitor.Namespace, "ServiceMonitor.Name", serviceMonitor.Name)
+		return s.Create(ctx, serviceMonitor)
+	}
+
+	return err
+}
+
+func (s *StandaloneController) cleanupServiceMonitor(ctx context.Context, redis *koncachev1alpha1.Redis) error {
+	log := logf.FromContext(ctx)
+	serviceMonitor := &monitoringv1.ServiceMonitor{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      redis.Name + "-monitor",
+			Namespace: redis.Namespace,
+		},
+	}
+	err := s.Get(ctx, types.NamespacedName{Name: serviceMonitor.Name, Namespace: serviceMonitor.Namespace}, serviceMonitor)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			log.Info("ServiceMonitor not found, nothing to clean up", "ServiceMonitor.Namespace", serviceMonitor.Namespace, "ServiceMonitor.Name", serviceMonitor.Name)
+			return nil
+		}
+		log.Error(err, "Failed to get ServiceMonitor for cleanup", "ServiceMonitor.Namespace", serviceMonitor.Namespace, "ServiceMonitor.Name", serviceMonitor.Name)
+		return err
+	}
+
+	log.Info("Deleting ServiceMonitor", "ServiceMonitor.Namespace", serviceMonitor.Namespace, "ServiceMonitor.Name", serviceMonitor.Name)
+	return s.Delete(ctx, serviceMonitor)
+}
+
+func (s *StandaloneController) serviceMonitorForRedis(redis *koncachev1alpha1.Redis) *monitoringv1.ServiceMonitor {
+	labels := LabelsForRedis(redis.Name)
+	return &monitoringv1.ServiceMonitor{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      redis.Name + "-monitor",
+			Namespace: redis.Namespace,
+			Labels:    labels,
+		},
+		Spec: monitoringv1.ServiceMonitorSpec{
+			Selector: metav1.LabelSelector{
+				MatchLabels: labels,
+			},
+			Endpoints: []monitoringv1.Endpoint{
+				{
+					Port:     "metrics",
+					Interval: "30s",
+				},
+			},
+			NamespaceSelector: monitoringv1.NamespaceSelector{
+				MatchNames: []string{redis.Namespace},
+			},
+		},
+	}
 }
 
 // reconcileConfigMap creates or updates the ConfigMap for Redis
