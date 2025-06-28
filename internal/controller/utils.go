@@ -19,6 +19,13 @@ const (
 	TLSCAVolumeName       = "tls-ca"
 )
 
+// Constants for TLS certificate keys
+const (
+	TLSCertKey = "tls.crt"
+	TLSKeyKey  = "tls.key"
+	TLSCAKey   = "ca.crt"
+)
+
 // LabelsForRedis returns the labels for selecting the resources
 func LabelsForRedis(name string) map[string]string {
 	return map[string]string{
@@ -143,8 +150,11 @@ func BuildRedisContainer(redis *koncachev1alpha1.Redis, port int32) corev1.Conta
 				ReadOnly:  true,
 			},
 		},
-		Command: []string{"redis-server"},
-		Args:    []string{"/usr/local/etc/redis/redis.conf"},
+		Command: []string{"sh", "-c"},
+		Args: []string{
+			`# Replace environment variables in config and start Redis
+			sed 's/\$REDIS_PASSWORD/'"$REDIS_PASSWORD"'/g' /usr/local/etc/redis/redis.conf > /tmp/redis.conf && redis-server /tmp/redis.conf`,
+		},
 	}
 
 	// Add security environment variables
@@ -314,6 +324,7 @@ func BuildRedisExporterContainer(redis *koncachev1alpha1.Redis, redisPort int32)
 	// Build Redis connection URL based on security settings
 	var redisAddr string
 	if IsTLSEnabled(redis) {
+		// For TLS connections, use rediss:// protocol with TLS port
 		redisAddr = "rediss://localhost:6380"
 	} else {
 		redisAddr = fmt.Sprintf("redis://localhost:%d", redisPort)
@@ -379,6 +390,13 @@ func BuildRedisExporterContainer(redis *koncachev1alpha1.Redis, redisPort int32)
 				Value: "/etc/redis/tls/ca.crt",
 			})
 		}
+
+		// For self-signed certificates, allow skipping TLS verification
+		// This is commonly needed in development/testing environments
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "REDIS_EXPORTER_SKIP_TLS_VERIFICATION",
+			Value: "true",
+		})
 	}
 
 	// Add liveness and readiness probes for the exporter
@@ -500,7 +518,13 @@ func buildTLSConfig(redis *koncachev1alpha1.Redis) string {
 	if redis.Spec.Security.TLS.CAFile != "" {
 		config += fmt.Sprintf("tls-ca-cert-file %s\n", redis.Spec.Security.TLS.CAFile)
 	} else if redis.Spec.Security.TLS.CASecret != "" {
-		config += "tls-ca-cert-file /etc/redis/tls/ca.crt\n"
+		// If CA secret is the same as cert secret, CA is in the same volume
+		if redis.Spec.Security.TLS.CASecret == redis.Spec.Security.TLS.CertSecret {
+			config += "tls-ca-cert-file /etc/redis/tls/ca.crt\n"
+		} else {
+			// CA secret is separate, mounted in different volume
+			config += "tls-ca-cert-file /etc/redis/tls-ca/ca.crt\n"
+		}
 	}
 
 	// TLS security settings
@@ -579,21 +603,31 @@ func BuildTLSVolumes(redis *koncachev1alpha1.Redis) []corev1.Volume {
 	if IsTLSEnabled(redis) {
 		// TLS certificate volume
 		if redis.Spec.Security.TLS.CertSecret != "" {
+			items := []corev1.KeyToPath{
+				{
+					Key:  TLSCertKey,
+					Path: TLSCertKey,
+				},
+				{
+					Key:  TLSKeyKey,
+					Path: TLSKeyKey,
+				},
+			}
+
+			// If CA secret is the same as cert secret, include ca.crt in the same volume
+			if redis.Spec.Security.TLS.CASecret == redis.Spec.Security.TLS.CertSecret {
+				items = append(items, corev1.KeyToPath{
+					Key:  TLSCAKey,
+					Path: TLSCAKey,
+				})
+			}
+
 			volumes = append(volumes, corev1.Volume{
 				Name: TLSCertsVolumeName,
 				VolumeSource: corev1.VolumeSource{
 					Secret: &corev1.SecretVolumeSource{
 						SecretName: redis.Spec.Security.TLS.CertSecret,
-						Items: []corev1.KeyToPath{
-							{
-								Key:  "tls.crt",
-								Path: "tls.crt",
-							},
-							{
-								Key:  "tls.key",
-								Path: "tls.key",
-							},
-						},
+						Items:      items,
 					},
 				},
 			})
@@ -609,8 +643,8 @@ func BuildTLSVolumes(redis *koncachev1alpha1.Redis) []corev1.Volume {
 						SecretName: redis.Spec.Security.TLS.CASecret,
 						Items: []corev1.KeyToPath{
 							{
-								Key:  "ca.crt",
-								Path: "ca.crt",
+								Key:  TLSCAKey,
+								Path: TLSCAKey,
 							},
 						},
 					},
