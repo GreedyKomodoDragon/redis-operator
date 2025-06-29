@@ -21,8 +21,12 @@ import (
 )
 
 const (
-	statefulSetNameField      = "StatefulSet.Name"
-	statefulSetNamespaceField = "StatefulSet.Namespace"
+	statefulSetNameField         = "StatefulSet.Name"
+	statefulSetNamespaceField    = "StatefulSet.Namespace"
+	configMapNameField           = "ConfigMap.Name"
+	configMapNamespaceField      = "ConfigMap.Namespace"
+	serviceMonitorNameField      = "ServiceMonitor.Name"
+	serviceMonitorNamespaceField = "ServiceMonitor.Namespace"
 )
 
 // StandaloneController handles the reconciliation of standalone Redis instances
@@ -43,8 +47,11 @@ func NewStandaloneController(client client.Client, scheme *runtime.Scheme) *Stan
 func (s *StandaloneController) Reconcile(ctx context.Context, redis *koncachev1alpha1.Redis) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
+	// Generate Redis configuration once for reuse
+	redisConfig := BuildRedisConfig(redis)
+
 	// Create or update ConfigMap
-	if err := s.reconcileConfigMap(ctx, redis); err != nil {
+	if err := s.reconcileConfigMap(ctx, redis, redisConfig); err != nil {
 		log.Error(err, "Failed to reconcile ConfigMap")
 		return ctrl.Result{}, err
 	}
@@ -70,7 +77,8 @@ func (s *StandaloneController) Reconcile(ctx context.Context, redis *koncachev1a
 	}
 
 	// Create or update StatefulSet
-	statefulSet, requeue, err := s.reconcileStatefulSet(ctx, redis)
+	configHash := ComputeStringHash(redisConfig)
+	statefulSet, requeue, err := s.reconcileStatefulSet(ctx, redis, redisConfig, configHash)
 	if err != nil {
 		log.Error(err, "Failed to reconcile StatefulSet")
 		return ctrl.Result{}, err
@@ -99,7 +107,7 @@ func (s *StandaloneController) reconcileServiceMonitor(ctx context.Context, redi
 	foundServiceMonitor := &monitoringv1.ServiceMonitor{}
 	err := s.Get(ctx, types.NamespacedName{Name: serviceMonitor.Name, Namespace: serviceMonitor.Namespace}, foundServiceMonitor)
 	if err != nil && errors.IsNotFound(err) {
-		log.Info("Creating a new ServiceMonitor", "ServiceMonitor.Namespace", serviceMonitor.Namespace, "ServiceMonitor.Name", serviceMonitor.Name)
+		log.Info("Creating a new ServiceMonitor", serviceMonitorNamespaceField, serviceMonitor.Namespace, serviceMonitorNameField, serviceMonitor.Name)
 		return s.Create(ctx, serviceMonitor)
 	}
 
@@ -117,14 +125,14 @@ func (s *StandaloneController) cleanupServiceMonitor(ctx context.Context, redis 
 	err := s.Get(ctx, types.NamespacedName{Name: serviceMonitor.Name, Namespace: serviceMonitor.Namespace}, serviceMonitor)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			log.Info("ServiceMonitor not found, nothing to clean up", "ServiceMonitor.Namespace", serviceMonitor.Namespace, "ServiceMonitor.Name", serviceMonitor.Name)
+			log.Info("ServiceMonitor not found, nothing to clean up", serviceMonitorNamespaceField, serviceMonitor.Namespace, serviceMonitorNameField, serviceMonitor.Name)
 			return nil
 		}
-		log.Error(err, "Failed to get ServiceMonitor for cleanup", "ServiceMonitor.Namespace", serviceMonitor.Namespace, "ServiceMonitor.Name", serviceMonitor.Name)
+		log.Error(err, "Failed to get ServiceMonitor for cleanup", serviceMonitorNamespaceField, serviceMonitor.Namespace, serviceMonitorNameField, serviceMonitor.Name)
 		return err
 	}
 
-	log.Info("Deleting ServiceMonitor", "ServiceMonitor.Namespace", serviceMonitor.Namespace, "ServiceMonitor.Name", serviceMonitor.Name)
+	log.Info("Deleting ServiceMonitor", serviceMonitorNamespaceField, serviceMonitor.Namespace, serviceMonitorNameField, serviceMonitor.Name)
 	return s.Delete(ctx, serviceMonitor)
 }
 
@@ -154,10 +162,10 @@ func (s *StandaloneController) serviceMonitorForRedis(redis *koncachev1alpha1.Re
 }
 
 // reconcileConfigMap creates or updates the ConfigMap for Redis
-func (s *StandaloneController) reconcileConfigMap(ctx context.Context, redis *koncachev1alpha1.Redis) error {
+func (s *StandaloneController) reconcileConfigMap(ctx context.Context, redis *koncachev1alpha1.Redis, redisConfig string) error {
 	log := logf.FromContext(ctx)
 
-	configMap := s.configMapForRedis(redis)
+	configMap := s.configMapForRedis(redis, redisConfig)
 	if err := controllerutil.SetControllerReference(redis, configMap, s.Scheme); err != nil {
 		return err
 	}
@@ -165,10 +173,23 @@ func (s *StandaloneController) reconcileConfigMap(ctx context.Context, redis *ko
 	foundConfigMap := &corev1.ConfigMap{}
 	err := s.Get(ctx, types.NamespacedName{Name: configMap.Name, Namespace: configMap.Namespace}, foundConfigMap)
 	if err != nil && errors.IsNotFound(err) {
-		log.Info("Creating a new ConfigMap", "ConfigMap.Namespace", configMap.Namespace, "ConfigMap.Name", configMap.Name)
+		log.Info("Creating a new ConfigMap", configMapNamespaceField, configMap.Namespace, configMapNameField, configMap.Name)
 		return s.Create(ctx, configMap)
+	} else if err != nil {
+		return err
 	}
-	return err
+
+	// ConfigMap exists, check if it needs to be updated
+	if !EqualStringMaps(foundConfigMap.Data, configMap.Data) {
+		log.Info("ConfigMap data has changed, updating", configMapNameField, configMap.Name)
+		foundConfigMap.Data = configMap.Data
+		foundConfigMap.Labels = configMap.Labels
+		foundConfigMap.Annotations = configMap.Annotations
+		return s.Update(ctx, foundConfigMap)
+	}
+
+	log.V(1).Info("ConfigMap is up-to-date, no changes needed", configMapNameField, configMap.Name)
+	return nil
 }
 
 // reconcileService creates or updates the Service for Redis
@@ -190,10 +211,10 @@ func (s *StandaloneController) reconcileService(ctx context.Context, redis *konc
 }
 
 // reconcileStatefulSet creates or updates the StatefulSet for Redis
-func (s *StandaloneController) reconcileStatefulSet(ctx context.Context, redis *koncachev1alpha1.Redis) (*appsv1.StatefulSet, bool, error) {
+func (s *StandaloneController) reconcileStatefulSet(ctx context.Context, redis *koncachev1alpha1.Redis, redisConfig, configHash string) (*appsv1.StatefulSet, bool, error) {
 	log := logf.FromContext(ctx)
 
-	statefulSet := s.statefulSetForRedis(redis)
+	statefulSet := s.statefulSetForRedis(redis, redisConfig, configHash)
 	if err := controllerutil.SetControllerReference(redis, statefulSet, s.Scheme); err != nil {
 		return nil, false, err
 	}
@@ -234,9 +255,8 @@ func (s *StandaloneController) reconcileStatefulSet(ctx context.Context, redis *
 }
 
 // configMapForRedis returns a ConfigMap object for the Redis configuration
-func (s *StandaloneController) configMapForRedis(redis *koncachev1alpha1.Redis) *corev1.ConfigMap {
+func (s *StandaloneController) configMapForRedis(redis *koncachev1alpha1.Redis, redisConfig string) *corev1.ConfigMap {
 	labels := LabelsForRedis(redis.Name)
-	configData := BuildRedisConfig(redis)
 
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -245,7 +265,7 @@ func (s *StandaloneController) configMapForRedis(redis *koncachev1alpha1.Redis) 
 			Labels:    labels,
 		},
 		Data: map[string]string{
-			"redis.conf": configData,
+			"redis.conf": redisConfig,
 		},
 	}
 }
@@ -314,7 +334,7 @@ func (s *StandaloneController) serviceForRedis(redis *koncachev1alpha1.Redis) *c
 }
 
 // statefulSetForRedis returns a StatefulSet object for Redis
-func (s *StandaloneController) statefulSetForRedis(redis *koncachev1alpha1.Redis) *appsv1.StatefulSet {
+func (s *StandaloneController) statefulSetForRedis(redis *koncachev1alpha1.Redis, redisConfig, configHash string) *appsv1.StatefulSet {
 	labels := LabelsForRedis(redis.Name)
 	replicas := int32(1) // Standalone Redis always has 1 replica
 	port := GetRedisPort(redis)
@@ -331,11 +351,21 @@ func (s *StandaloneController) statefulSetForRedis(redis *koncachev1alpha1.Redis
 		containers = append(containers, exporterContainer)
 	}
 
+	// Prepare pod annotations - start with user-specified annotations
+	podAnnotations := make(map[string]string)
+	if redis.Spec.PodAnnotations != nil {
+		for k, v := range redis.Spec.PodAnnotations {
+			podAnnotations[k] = v
+		}
+	}
+	// Add config hash annotation to trigger pod restart when ConfigMap changes
+	podAnnotations["redis-operator/config-hash"] = configHash
+
 	// Build pod template
 	podTemplate := corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels:      labels,
-			Annotations: redis.Spec.PodAnnotations,
+			Annotations: podAnnotations,
 		},
 		Spec: corev1.PodSpec{
 			ServiceAccountName: redis.Spec.ServiceAccount,

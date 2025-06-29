@@ -82,11 +82,13 @@ func TestBuildRedisContainer(t *testing.T) {
 			assert.NotNil(t, result.ReadinessProbe, "Container should have readiness probe")
 
 			// Test command and args
-			expectedCommand := []string{"redis-server"}
+			expectedCommand := []string{"sh", "-c"}
 			assert.Equal(t, expectedCommand, result.Command)
 
-			expectedArgs := []string{"/usr/local/etc/redis/redis.conf"}
-			assert.Equal(t, expectedArgs, result.Args)
+			// Test that args contain the Redis startup script with environment variable substitution
+			require.Len(t, result.Args, 1, "Container should have exactly 1 arg")
+			assert.Contains(t, result.Args[0], "sed 's/\\$REDIS_PASSWORD/'", "Args should contain password substitution logic")
+			assert.Contains(t, result.Args[0], "redis-server /tmp/redis.conf", "Args should contain redis-server command")
 		})
 	}
 }

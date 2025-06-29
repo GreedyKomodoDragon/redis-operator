@@ -322,3 +322,54 @@ func TestTolerationsEqual(t *testing.T) {
 		})
 	}
 }
+
+func TestComputeStringHash(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		expected string
+	}{
+		{
+			name:     "empty string",
+			content:  "",
+			expected: "",
+		},
+		{
+			name:    "simple redis config",
+			content: "port 6379\nmaxmemory 512mb",
+			// We'll verify consistency rather than exact value for non-empty strings
+		},
+		{
+			name:    "complex redis config",
+			content: "# Redis configuration\nport 6379\nmaxmemory 1gb\nmaxmemory-policy allkeys-lru\nsave 900 1\nsave 300 10\nappendonly yes",
+		},
+		{
+			name:    "config with special characters",
+			content: "requirepass \"my-$ecret-p@ssw0rd!\"\ntcp-backlog 511",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := controller.ComputeStringHash(tt.content)
+
+			if tt.content == "" {
+				assert.Equal(t, "", result, "Empty string should return empty hash")
+			} else {
+				assert.Len(t, result, 16, "Hash should be 16 characters long")
+				assert.Regexp(t, "^[a-f0-9]+$", result, "Hash should be lowercase hex")
+			}
+		})
+	}
+}
+
+func TestComputeStringHashConsistency(t *testing.T) {
+	// Test that the same string produces the same hash
+	content := "port 6379\nmaxmemory 512mb\nmaxmemory-policy allkeys-lru"
+
+	hash1 := controller.ComputeStringHash(content)
+	hash2 := controller.ComputeStringHash(content)
+
+	assert.Equal(t, hash1, hash2, "Same string should produce same hash")
+	assert.Len(t, hash1, 16, "Hash should be 16 characters long")
+}

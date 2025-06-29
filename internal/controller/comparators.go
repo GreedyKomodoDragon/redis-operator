@@ -1,6 +1,9 @@
 package controller
 
 import (
+	"crypto/sha256"
+	"fmt"
+
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -71,4 +74,16 @@ func TolerationsEqual(a, b corev1.Toleration) bool {
 	}
 
 	return false
+}
+
+// ComputeStringHash computes a SHA256 hash of a string
+// This is a more efficient way to hash single configuration strings
+func ComputeStringHash(content string) string {
+	if content == "" {
+		return ""
+	}
+
+	hasher := sha256.New()
+	hasher.Write([]byte(content))
+	return fmt.Sprintf("%x", hasher.Sum(nil))[:16] // Use first 16 chars for brevity
 }
