@@ -110,6 +110,53 @@ the '--force' flag and manually ensure that any custom configuration
 previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
 is manually re-applied afterwards.
 
+## Testing
+
+The Redis Operator includes comprehensive testing at multiple levels:
+
+### Unit Tests
+
+Run the standard unit tests:
+
+```sh
+make test
+```
+
+### Cucumber Integration Tests
+
+The project includes Cucumber/Gherkin-based integration tests for end-to-end testing scenarios.
+
+**Quick unit tests only (CI-friendly):**
+```sh
+make test-cucumber-short
+```
+
+**Full integration tests (requires minikube):**
+```sh
+# Ensure minikube is running
+minikube start
+
+# Run integration tests
+make test-cucumber
+
+# Or use the helper script with auto-setup
+./scripts/run-cucumber-tests.sh
+```
+
+**Run all tests:**
+```sh
+make test-all
+```
+
+The cucumber tests cover:
+- Standalone Redis deployment scenarios
+- TLS and authentication security features  
+- Monitoring and metrics collection
+- Configuration updates and persistence
+- Resource lifecycle management
+
+See [test/cucumber/README.md](test/cucumber/README.md) for detailed documentation.
+
 ## Contributing
 // TODO(user): Add detailed information on how you would like others to contribute to this project
 

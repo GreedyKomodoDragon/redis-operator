@@ -148,7 +148,26 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 # - CERT_MANAGER_INSTALL_SKIP=true
 .PHONY: test-e2e
 test-e2e: manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	go test ./test/e2e/ -v -ginkgo.v
+
+.PHONY: test-cucumber
+test-cucumber: ## Run cucumber integration tests against minikube (skipped with -short flag)
+	@echo "Running cucumber integration tests..."
+	@if ! command -v minikube >/dev/null 2>&1; then \
+		echo "minikube is required for integration tests"; \
+		exit 1; \
+	fi
+	@if ! minikube status >/dev/null 2>&1; then \
+		echo "minikube must be running for integration tests"; \
+		exit 1; \
+	fi
+	cd test/cucumber && go test -v -tags=integration
+
+.PHONY: test-cucumber-short
+test-cucumber-short: ## Run unit tests only, skipping cucumber integration tests
+	cd test/cucumber && go test -short -v
+
+.PHONY: test-all
+test-all: test test-cucumber ## Run all tests including cucumber integration tests
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
