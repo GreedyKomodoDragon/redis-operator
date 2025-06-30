@@ -34,10 +34,10 @@ import (
 const namespace = "redis-operator-system"
 
 // serviceAccountName created for the project
-const serviceAccountName = "redis-operator-controller-manager"
+const serviceAccountName = "redis-operator"
 
 // metricsServiceName is the name of the metrics service of the project
-const metricsServiceName = "redis-operator-controller-manager-metrics-service"
+const metricsServiceName = "redis-operator-metrics-service"
 
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
 const metricsRoleBindingName = "redis-operator-metrics-binding"

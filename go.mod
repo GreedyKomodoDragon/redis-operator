@@ -7,6 +7,7 @@ toolchain go1.24.4
 godebug default=go1.23
 
 require (
+	github.com/cucumber/godog v0.15.0
 	github.com/onsi/ginkgo/v2 v2.22.0
 	github.com/onsi/gomega v1.36.1
 	github.com/stretchr/testify v1.10.0
@@ -17,6 +18,12 @@ require (
 )
 
 require (
+	github.com/cucumber/gherkin/go/v26 v26.2.0 // indirect
+	github.com/cucumber/messages/go/v21 v21.0.1 // indirect
+	github.com/gofrs/uuid v4.3.1+incompatible // indirect
+	github.com/hashicorp/go-immutable-radix v1.3.1 // indirect
+	github.com/hashicorp/go-memdb v1.3.4 // indirect
+	github.com/hashicorp/golang-lru v0.5.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
 )
