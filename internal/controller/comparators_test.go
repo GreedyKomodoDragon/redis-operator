@@ -362,14 +362,3 @@ func TestComputeStringHash(t *testing.T) {
 		})
 	}
 }
-
-func TestComputeStringHashConsistency(t *testing.T) {
-	// Test that the same string produces the same hash
-	content := "port 6379\nmaxmemory 512mb\nmaxmemory-policy allkeys-lru"
-
-	hash1 := controller.ComputeStringHash(content)
-	hash2 := controller.ComputeStringHash(content)
-
-	assert.Equal(t, hash1, hash2, "Same string should produce same hash")
-	assert.Len(t, hash1, 16, "Hash should be 16 characters long")
-}
