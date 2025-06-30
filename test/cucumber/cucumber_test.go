@@ -20,6 +20,12 @@ func init() {
 
 func TestMain(m *testing.M) {
 	flag.Parse()
+
+	// Skip cucumber tests in short mode
+	if testing.Short() {
+		os.Exit(0)
+	}
+
 	opts.Paths = flag.Args()
 
 	status := godog.TestSuite{
