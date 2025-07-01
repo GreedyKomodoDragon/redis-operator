@@ -76,6 +76,20 @@ func (s *StandaloneController) Reconcile(ctx context.Context, redis *koncachev1a
 		}
 	}
 
+	// Create or update backup statefulset if backups are enabled
+	if redis.Spec.Backup.Enabled {
+		if err := s.reconcileBackupStatefulSet(ctx, redis); err != nil {
+			log.Error(err, "Failed to reconcile backup StatefulSet")
+			return ctrl.Result{}, err
+		}
+	} else {
+		// Clean up backup StatefulSet if it exists but backups are disabled
+		// if err := s.cleanupBackupStatefulSet(ctx, redis); err != nil {
+		// 	log.Error(err, "Failed to cleanup backup StatefulSet")
+		// 	return ctrl.Result{}, err
+		// }
+	}
+
 	// Create or update StatefulSet
 	configHash := ComputeStringHash(redisConfig)
 	statefulSet, requeue, err := s.reconcileStatefulSet(ctx, redis, redisConfig, configHash)
@@ -477,6 +491,80 @@ func statusEqual(a, b *koncachev1alpha1.RedisStatus) bool {
 		a.ObservedGeneration == b.ObservedGeneration
 }
 
+// reconcileBackupStatefulSet creates or updates the backup StatefulSet
+func (s *StandaloneController) reconcileBackupStatefulSet(ctx context.Context, redis *koncachev1alpha1.Redis) error {
+	log := logf.FromContext(ctx)
+
+	statefulSetForBackup := s.backupStatefulSetForRedis(redis)
+	if err := controllerutil.SetControllerReference(redis, statefulSetForBackup, s.Scheme); err != nil {
+		return err
+	}
+
+	foundBackupStatefulSet := &appsv1.StatefulSet{}
+	err := s.Get(ctx, types.NamespacedName{Name: statefulSetForBackup.Name, Namespace: statefulSetForBackup.Namespace}, foundBackupStatefulSet)
+	if err != nil && errors.IsNotFound(err) {
+		log.Info("Creating a new backup StatefulSet",
+			"StatefulSet.Namespace", statefulSetForBackup.Namespace,
+			"StatefulSet.Name", statefulSetForBackup.Name)
+		return s.Create(ctx, statefulSetForBackup)
+	} else if err != nil {
+		log.Error(err, "Failed to get backup StatefulSet",
+			"StatefulSet.Namespace", statefulSetForBackup.Namespace,
+			"StatefulSet.Name", statefulSetForBackup.Name)
+		return err
+	}
+
+	// Check if backup StatefulSet needs to be updated
+	if !s.needsBackupStatefulSetUpdate(foundBackupStatefulSet, statefulSetForBackup) {
+		log.V(1).Info("Backup StatefulSet is up-to-date, no changes needed",
+			"StatefulSet.Name", foundBackupStatefulSet.Name)
+		return nil
+	}
+
+	log.Info("Backup StatefulSet spec has changed, updating",
+		"StatefulSet.Name", foundBackupStatefulSet.Name)
+
+	// Update the existing backup StatefulSet with the new spec
+	// Note: VolumeClaimTemplates cannot be updated in StatefulSets, so we only update what's allowed
+	foundBackupStatefulSet.Spec.Replicas = statefulSetForBackup.Spec.Replicas
+	foundBackupStatefulSet.Spec.Template = statefulSetForBackup.Spec.Template
+	foundBackupStatefulSet.Spec.UpdateStrategy = statefulSetForBackup.Spec.UpdateStrategy
+	foundBackupStatefulSet.Labels = statefulSetForBackup.Labels
+	foundBackupStatefulSet.Annotations = statefulSetForBackup.Annotations
+
+	if err := s.Update(ctx, foundBackupStatefulSet); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (s *StandaloneController) backupStatefulSetForRedis(redis *koncachev1alpha1.Redis) *appsv1.StatefulSet {
+	var single int32 = 1
+
+	// Create backup-specific labels
+	labels := LabelsForRedis(redis.Name)
+	labels["app.kubernetes.io/component"] = "backup"
+
+	return &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      redis.Name + "-backup",
+			Namespace: redis.Namespace,
+			Labels:    labels,
+		},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas:             &single,
+			ServiceName:          redis.Name + "-backup",
+			Selector:             &metav1.LabelSelector{MatchLabels: labels},
+			Template:             BuildBackupPodTemplateForRedis(redis),
+			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{BuildBackupVolumeClaimTemplate(redis)},
+			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
+				Type: appsv1.RollingUpdateStatefulSetStrategyType,
+			},
+		},
+	}
+}
+
 // needsStatefulSetUpdate checks if the StatefulSet needs to be updated based on the Redis spec
 func (s *StandaloneController) needsStatefulSetUpdate(existing, desired *appsv1.StatefulSet) bool {
 	return s.hasBasicSpecChanges(existing, desired) || // Check basic spec differences
@@ -558,4 +646,102 @@ func (s *StandaloneController) hasMetadataChanges(existing, desired *appsv1.Stat
 		!EqualStringMaps(existing.Labels, desired.Labels) ||
 		!EqualStringMaps(existing.Annotations, desired.Annotations) ||
 		!EqualTolerations(existing.Spec.Template.Spec.Tolerations, desired.Spec.Template.Spec.Tolerations)
+}
+
+// needsBackupStatefulSetUpdate checks if the backup StatefulSet needs to be updated
+func (s *StandaloneController) needsBackupStatefulSetUpdate(existing, desired *appsv1.StatefulSet) bool {
+	// Check basic spec differences
+	if s.hasBasicSpecChanges(existing, desired) {
+		return true
+	}
+
+	// Check container differences
+	if s.hasContainerChanges(existing, desired) {
+		return true
+	}
+
+	// Check metadata differences
+	if s.hasMetadataChanges(existing, desired) {
+		return true
+	}
+
+	// Check VolumeClaimTemplates differences (this is critical for PVC mismatch issues)
+	// Note: VolumeClaimTemplates cannot be updated, but we can detect if they differ
+	// and log a warning or handle it appropriately
+	if s.hasVolumeClaimTemplateChanges(existing, desired) {
+		// Log a warning since VolumeClaimTemplates cannot be updated
+		logf.Log.Info("VolumeClaimTemplates differ but cannot be updated in existing StatefulSet",
+			"StatefulSet.Name", existing.Name,
+			"StatefulSet.Namespace", existing.Namespace)
+		// Return false here as we cannot update VolumeClaimTemplates
+		// The operator would need to delete and recreate the StatefulSet manually
+		return false
+	}
+
+	return false
+}
+
+// hasVolumeClaimTemplateChanges checks if VolumeClaimTemplates have changed
+func (s *StandaloneController) hasVolumeClaimTemplateChanges(existing, desired *appsv1.StatefulSet) bool {
+	if len(existing.Spec.VolumeClaimTemplates) != len(desired.Spec.VolumeClaimTemplates) {
+		return true
+	}
+
+	for i, existingVCT := range existing.Spec.VolumeClaimTemplates {
+		if i >= len(desired.Spec.VolumeClaimTemplates) {
+			return true
+		}
+
+		desiredVCT := desired.Spec.VolumeClaimTemplates[i]
+
+		// Check if storage size has changed
+		existingSize := existingVCT.Spec.Resources.Requests[corev1.ResourceStorage]
+		desiredSize := desiredVCT.Spec.Resources.Requests[corev1.ResourceStorage]
+		if !existingSize.Equal(desiredSize) {
+			return true
+		}
+
+		// Check if storage class has changed
+		if (existingVCT.Spec.StorageClassName == nil) != (desiredVCT.Spec.StorageClassName == nil) {
+			return true
+		}
+		if existingVCT.Spec.StorageClassName != nil && desiredVCT.Spec.StorageClassName != nil &&
+			*existingVCT.Spec.StorageClassName != *desiredVCT.Spec.StorageClassName {
+			return true
+		}
+
+		// Check if access modes have changed
+		if len(existingVCT.Spec.AccessModes) != len(desiredVCT.Spec.AccessModes) {
+			return true
+		}
+		for j, existingMode := range existingVCT.Spec.AccessModes {
+			if j >= len(desiredVCT.Spec.AccessModes) || existingMode != desiredVCT.Spec.AccessModes[j] {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// handleVolumeClaimTemplateMismatch handles the case where VolumeClaimTemplates differ
+// and cannot be updated automatically. This requires manual intervention or StatefulSet recreation.
+func (s *StandaloneController) handleVolumeClaimTemplateMismatch(ctx context.Context, redis *koncachev1alpha1.Redis, existing, desired *appsv1.StatefulSet) error {
+	log := logf.FromContext(ctx)
+
+	log.Info("VolumeClaimTemplate mismatch detected - manual intervention required",
+		"StatefulSet.Name", existing.Name,
+		"StatefulSet.Namespace", existing.Namespace,
+		"Issue", "VolumeClaimTemplates cannot be updated in existing StatefulSets")
+
+	// TODO: In the future, we could implement:
+	// 1. Automated backup and restore procedures
+	// 2. StatefulSet recreation with data migration
+	// 3. Event emission to notify administrators
+	// 4. Status updates to reflect the issue
+
+	// For now, we'll just emit an event to notify administrators
+	// This would require event recording capability which should be added to the controller
+
+	return nil
 }

@@ -51,6 +51,8 @@ endif
 OPERATOR_SDK_VERSION ?= v1.40.0
 # Image URL to use all building/pushing image targets
 IMG ?= greedykomodo/redis-operator:v$(VERSION)
+# Backup image URL
+BACKUP_IMG ?= greedykomodo/redis-backup:v$(VERSION)
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -187,6 +189,10 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
 
+.PHONY: build-backup
+build-backup: fmt vet ## Build backup binary.
+	go build -o bin/backup cmd/backup/main.go
+
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go
@@ -198,9 +204,17 @@ run: manifests generate fmt vet ## Run a controller from your host.
 docker-build: ## Build docker image with the manager.
 	$(CONTAINER_TOOL) build -t ${IMG} .
 
+.PHONY: docker-build-backup
+docker-build-backup: ## Build docker image with the backup service.
+	$(CONTAINER_TOOL) build -f Dockerfile.backup -t ${BACKUP_IMG} .
+
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
+
+.PHONY: docker-push-backup
+docker-push-backup: ## Push docker image with the backup service.
+	$(CONTAINER_TOOL) push ${BACKUP_IMG}
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
@@ -269,6 +283,38 @@ minikube-redeploy: minikube-load-no-cache ## Build without cache, load into mini
 	$(HELM) upgrade --install redis-operator $(HELM_CHART_DIR) --namespace redis-operator-system --create-namespace --set operator.image.repository=$(shell echo ${IMG} | cut -d: -f1) --set operator.image.tag=$(shell echo ${IMG} | cut -d: -f2) --set operator.image.pullPolicy=Never
 	@echo "Redis operator redeployed to minikube successfully!"
 	@echo "Check the deployment status with: kubectl get pods -n redis-operator-system"
+
+.PHONY: minikube-load-backup
+minikube-load-backup: docker-build-backup ## Build backup docker image and load it into minikube, replacing any existing image with the same tag.
+	@echo "Building and loading $(BACKUP_IMG) into minikube..."
+	@echo "Removing existing backup image from minikube if it exists..."
+	@minikube image rm $(BACKUP_IMG) 2>/dev/null || true
+	@echo "Saving backup docker image to tar file..."
+	@$(CONTAINER_TOOL) image save -o backup-image.tar $(BACKUP_IMG)
+	@echo "Loading backup image into minikube..."
+	@minikube image load backup-image.tar
+	@echo "Cleaning up tar file..."
+	@rm -f backup-image.tar
+	@echo "Successfully loaded $(BACKUP_IMG) into minikube!"
+	@echo "Verifying backup image is loaded:"
+	@minikube image ls | grep $(shell echo $(BACKUP_IMG) | cut -d: -f1) || echo "Warning: Backup image verification failed"
+
+.PHONY: minikube-load-backup-no-cache
+minikube-load-backup-no-cache: ## Build backup docker image without cache and load it into minikube, replacing any existing image.
+	@echo "Building $(BACKUP_IMG) without cache and loading into minikube..."
+	@echo "Removing existing backup image from minikube if it exists..."
+	@minikube image rm $(BACKUP_IMG) 2>/dev/null || true
+	@echo "Building backup docker image without cache..."
+	@$(CONTAINER_TOOL) build --no-cache -f Dockerfile.backup -t $(BACKUP_IMG) .
+	@echo "Saving backup docker image to tar file..."
+	@$(CONTAINER_TOOL) image save -o backup-image.tar $(BACKUP_IMG)
+	@echo "Loading backup image into minikube..."
+	@minikube image load backup-image.tar
+	@echo "Cleaning up tar file..."
+	@rm -f backup-image.tar
+	@echo "Successfully loaded $(BACKUP_IMG) into minikube!"
+	@echo "Verifying backup image is loaded:"
+	@minikube image ls | grep $(shell echo $(BACKUP_IMG) | cut -d: -f1) || echo "Warning: Backup image verification failed"
 
 ##@ Deployment
 

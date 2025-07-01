@@ -484,6 +484,10 @@ type RedisBackup struct {
 	// Enabled specifies whether backup is enabled
 	Enabled bool `json:"enabled"`
 
+	// Image specifies the backup container image
+	// +kubebuilder:default="koncache/redis-backup:latest"
+	Image string `json:"image,omitempty"`
+
 	// Schedule specifies the backup schedule in cron format
 	Schedule string `json:"schedule,omitempty"`
 
@@ -493,6 +497,21 @@ type RedisBackup struct {
 
 	// Storage specifies backup storage configuration
 	Storage RedisBackupStorage `json:"storage,omitempty"`
+
+	// PodTemplate specifies the pod template for backup jobs
+	PodTemplate PodSpec `json:"podTemplate,omitempty"`
+
+	// Annotations specifies additional annotations for the backup pod
+	Annotations map[string]string `json:"annotations,omitempty"`
+}
+
+type PodSpec struct {
+	NodeSelector     map[string]string             `json:"nodeSelector,omitempty" protobuf:"bytes,7,rep,name=nodeSelector"`
+	SecurityContext  *corev1.PodSecurityContext    `json:"securityContext,omitempty" protobuf:"bytes,14,opt,name=securityContext"`
+	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty" patchStrategy:"merge" patchMergeKey:"name" protobuf:"bytes,15,rep,name=imagePullSecrets"`
+	Affinity         *corev1.Affinity              `json:"affinity,omitempty" protobuf:"bytes,18,opt,name=affinity"`
+	Tolerations      []corev1.Toleration           `json:"tolerations,omitempty" protobuf:"bytes,22,opt,name=tolerations"`
+	Resources        *corev1.ResourceRequirements  `json:"resources,omitempty" protobuf:"bytes,40,opt,name=resources"`
 }
 
 // RedisBackupStorage defines backup storage configuration
