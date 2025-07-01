@@ -9,6 +9,10 @@ import (
 	koncachev1alpha1 "github.com/GreedyKomodoDragon/redis-operator/api/v1alpha1"
 )
 
+const (
+	RedisBackupVolumeName = "redis-backup-volume"
+)
+
 // BuildRedisContainer builds the Redis container specification
 func BuildRedisContainer(redis *koncachev1alpha1.Redis, port int32) corev1.Container {
 	// Build container ports based on TLS configuration
@@ -189,4 +193,42 @@ func BuildRedisExporterContainer(redis *koncachev1alpha1.Redis, redisPort int32)
 	}
 
 	return container
+}
+
+func BuildBackupPodTemplateForRedis(redis *koncachev1alpha1.Redis) corev1.PodTemplateSpec {
+	// Build the Redis backup container
+	backupContainer := BuildBackupContainer(redis)
+
+	// Create the pod template with the backup container
+	return corev1.PodTemplateSpec{
+		ObjectMeta: BuildBackupObjectMeta(redis),
+		Spec: corev1.PodSpec{
+			Containers:      []corev1.Container{backupContainer},
+			Volumes:         BuildBackupVolumes(redis),
+			NodeSelector:    redis.Spec.Backup.PodTemplate.NodeSelector,
+			Tolerations:     redis.Spec.Backup.PodTemplate.Tolerations,
+			SecurityContext: redis.Spec.Backup.PodTemplate.SecurityContext,
+			Affinity:        redis.Spec.Backup.PodTemplate.Affinity,
+		},
+	}
+}
+
+// BuildBackupContainer builds the container for Redis backup jobs
+func BuildBackupContainer(redis *koncachev1alpha1.Redis) corev1.Container {
+	// Use the Redis image for backup jobs
+	backupContainer := corev1.Container{
+		Name:            "redis-backup",
+		Image:           redis.Spec.Backup.Image,
+		ImagePullPolicy: redis.Spec.ImagePullPolicy,
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      RedisBackupVolumeName,
+				MountPath: "/data",
+			},
+		},
+	}
+
+	// TODO: Add security environment variables if needed
+
+	return backupContainer
 }

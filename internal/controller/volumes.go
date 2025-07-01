@@ -37,6 +37,52 @@ func BuildVolumeClaimTemplate(redis *koncachev1alpha1.Redis) corev1.PersistentVo
 	}
 }
 
+// BuildBackupVolumeClaimTemplate builds the volume claim template for backup StatefulSets
+func BuildBackupVolumeClaimTemplate(redis *koncachev1alpha1.Redis) corev1.PersistentVolumeClaim {
+	// Default storage size if not specified
+	storageSize := resource.MustParse("1Gi")
+	var storageClassName *string
+	accessModes := []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}
+
+	// Use backup-specific storage configuration if available
+	if redis.Spec.Backup.Storage.PVC != nil {
+		if !redis.Spec.Backup.Storage.PVC.Size.IsZero() {
+			storageSize = redis.Spec.Backup.Storage.PVC.Size
+		}
+		storageClassName = redis.Spec.Backup.Storage.PVC.StorageClassName
+	} else if !redis.Spec.Storage.Size.IsZero() {
+		// Fallback to main storage configuration
+		storageSize = redis.Spec.Storage.Size
+		storageClassName = redis.Spec.Storage.StorageClassName
+
+		// Use main storage access modes if specified
+		if len(redis.Spec.Storage.AccessModes) > 0 {
+			accessModes = redis.Spec.Storage.AccessModes
+		}
+	}
+
+	return corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: RedisBackupVolumeName,
+			Labels: map[string]string{
+				"app.kubernetes.io/name":      "redis",
+				"app.kubernetes.io/instance":  redis.Name,
+				"app.kubernetes.io/component": "backup-storage",
+				"app.kubernetes.io/part-of":   "redis-operator",
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes:      accessModes,
+			StorageClassName: storageClassName,
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: storageSize,
+				},
+			},
+		},
+	}
+}
+
 // BuildConfigMapVolume creates a ConfigMap volume for Redis configuration
 func BuildConfigMapVolume(redisName string) corev1.Volume {
 	return corev1.Volume{
@@ -153,6 +199,21 @@ func buildVolumes(redis *koncachev1alpha1.Redis) []corev1.Volume {
 			},
 		},
 	}
+
+	// Add TLS volumes if TLS is enabled
+	tlsVolumes := BuildTLSVolumes(redis)
+	if len(tlsVolumes) > 0 {
+		volumes = append(volumes, tlsVolumes...)
+	}
+
+	return volumes
+}
+
+// BuildBackupVolumes builds volumes for Redis backup jobs
+func BuildBackupVolumes(redis *koncachev1alpha1.Redis) []corev1.Volume {
+	// For StatefulSets, the backup volume is created automatically from VolumeClaimTemplate
+	// We only need to include other volumes like TLS volumes
+	var volumes []corev1.Volume
 
 	// Add TLS volumes if TLS is enabled
 	tlsVolumes := BuildTLSVolumes(redis)
