@@ -215,11 +215,58 @@ func BuildBackupPodTemplateForRedis(redis *koncachev1alpha1.Redis) corev1.PodTem
 
 // BuildBackupContainer builds the container for Redis backup jobs
 func BuildBackupContainer(redis *koncachev1alpha1.Redis) corev1.Container {
-	// Use the Redis image for backup jobs
+	// Determine the correct Redis port based on TLS configuration
+	var redisPort int32
+	if IsTLSEnabled(redis) {
+		redisPort = 6380 // TLS port
+	} else {
+		redisPort = GetRedisPort(redis) // Regular port
+	}
+
+	// Build environment variables for Redis connection
+	// Use FQDN for reliable service resolution across different cluster configurations
+	redisHostFQDN := fmt.Sprintf("%s.%s.svc.cluster.local", redis.Name, redis.Namespace)
+
+	envVars := []corev1.EnvVar{
+		{
+			Name:  "REDIS_HOST",
+			Value: redisHostFQDN,
+		},
+		{
+			Name:  "REDIS_PORT",
+			Value: fmt.Sprintf("%d", redisPort),
+		},
+		{
+			Name:  "REDIS_DB",
+			Value: "0", // Default database
+		},
+	}
+
+	// Add password environment variable if authentication is enabled
+	if redis.Spec.Security.RequireAuth != nil && *redis.Spec.Security.RequireAuth && redis.Spec.Security.PasswordSecret != nil {
+		envVars = append(envVars, corev1.EnvVar{
+			Name: "REDIS_PASSWORD",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: redis.Spec.Security.PasswordSecret,
+			},
+		})
+	}
+
+	// Add TLS environment variables if TLS is enabled
+	if IsTLSEnabled(redis) {
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  "REDIS_TLS_ENABLED",
+			Value: "true",
+		})
+		// Note: TLS certificate paths would be mounted via volumes if needed
+	}
+
 	backupContainer := corev1.Container{
 		Name:            "redis-backup",
 		Image:           redis.Spec.Backup.Image,
 		ImagePullPolicy: redis.Spec.ImagePullPolicy,
+		// Use the image's default entrypoint (/backup)
+		Env: envVars,
 		VolumeMounts: []corev1.VolumeMount{
 			{
 				Name:      RedisBackupVolumeName,
@@ -227,8 +274,6 @@ func BuildBackupContainer(redis *koncachev1alpha1.Redis) corev1.Container {
 			},
 		},
 	}
-
-	// TODO: Add security environment variables if needed
 
 	return backupContainer
 }
