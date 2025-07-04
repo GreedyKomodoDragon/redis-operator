@@ -261,6 +261,76 @@ func BuildBackupContainer(redis *koncachev1alpha1.Redis) corev1.Container {
 		// Note: TLS certificate paths would be mounted via volumes if needed
 	}
 
+	// Add retry configuration environment variables
+	envVars = append(envVars, []corev1.EnvVar{
+		{
+			Name:  "MAX_RETRIES",
+			Value: "5",
+		},
+		{
+			Name:  "RETRY_DELAY_SECONDS",
+			Value: "5",
+		},
+		{
+			Name:  "MAX_RETRY_DELAY_SECONDS",
+			Value: "300",
+		},
+		{
+			Name:  "BACKUP_DIR",
+			Value: "/data",
+		},
+	}...)
+
+	// Add S3 configuration if backup S3 settings are configured
+	if redis.Spec.Backup.Storage.Type == "s3" && redis.Spec.Backup.Storage.S3 != nil {
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  "S3_BUCKET",
+			Value: redis.Spec.Backup.Storage.S3.Bucket,
+		})
+
+		if redis.Spec.Backup.Storage.S3.Region != "" {
+			envVars = append(envVars, corev1.EnvVar{
+				Name:  "AWS_REGION",
+				Value: redis.Spec.Backup.Storage.S3.Region,
+			})
+		}
+
+		if redis.Spec.Backup.Storage.S3.Prefix != "" {
+			envVars = append(envVars, corev1.EnvVar{
+				Name:  "S3_PREFIX",
+				Value: redis.Spec.Backup.Storage.S3.Prefix,
+			})
+		}
+
+		// Add AWS credentials from secret if configured
+		if redis.Spec.Backup.Storage.S3.SecretName != "" {
+			envVars = append(envVars, []corev1.EnvVar{
+				{
+					Name: "AWS_ACCESS_KEY_ID",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: redis.Spec.Backup.Storage.S3.SecretName,
+							},
+							Key: "access-key-id",
+						},
+					},
+				},
+				{
+					Name: "AWS_SECRET_ACCESS_KEY",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: redis.Spec.Backup.Storage.S3.SecretName,
+							},
+							Key: "secret-access-key",
+						},
+					},
+				},
+			}...)
+		}
+	}
+
 	backupContainer := corev1.Container{
 		Name:            "redis-backup",
 		Image:           redis.Spec.Backup.Image,
