@@ -2,146 +2,353 @@ package backup
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
-
-	"github.com/redis/go-redis/v9"
 )
 
 type BackupService struct {
-	redisClient *redis.Client
+	backupDir   string
+	s3Bucket    string
+	s3Enabled   bool
+	redisClient *RedisClient
+
+	// Replication state
+	replID     string
+	replOffset int64
+}
+
+type ReplicationInfo struct {
+	ID     string
+	Offset int64
 }
 
 func Run() {
 	// Initialize the backup service
 	backupService := &BackupService{}
 
-	// Initialize Redis client with retry
-	maxRetries := 10
-	waitTime := 5 * time.Second
-
-	var err error
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		fmt.Printf("Attempt %d/%d: Initializing Redis connection...\n", attempt, maxRetries)
-
-		err = backupService.initRedisClient()
-		if err == nil {
-			fmt.Printf("Successfully connected to Redis on attempt %d\n", attempt)
-			break
-		}
-
-		fmt.Printf("Connection attempt %d failed: %v\n", attempt, err)
-		if attempt < maxRetries {
-			fmt.Printf("Waiting %v before retry...\n", waitTime)
-			time.Sleep(waitTime)
-		}
+	if err := backupService.initialize(); err != nil {
+		panic(fmt.Errorf("failed to initialize backup service: %v", err))
 	}
 
-	if err != nil {
-		panic(fmt.Errorf("failed to initialize Redis client after %d attempts: %v", maxRetries, err))
-	}
-
-	defer backupService.redisClient.Close()
-
-	// Start the backup service
+	// Start the backup process
 	if err := backupService.Start(context.Background()); err != nil {
-		panic(err)
+		panic(fmt.Errorf("backup service failed: %v", err))
 	}
 }
 
-func (s *BackupService) initRedisClient() error {
+func (s *BackupService) initialize() error {
 	// Get Redis connection details from environment variables
 	redisHost := getEnvOrDefault("REDIS_HOST", "localhost")
 	redisPort := getEnvOrDefault("REDIS_PORT", "6379")
 	redisPassword := os.Getenv("REDIS_PASSWORD")
-	redisDB := getEnvIntOrDefault("REDIS_DB", 0)
 	tlsEnabled := getEnvOrDefault("REDIS_TLS_ENABLED", "false") == "true"
 
-	fmt.Printf("Attempting to connect to Redis at %s:%s (TLS: %v)\n", redisHost, redisPort, tlsEnabled)
-
-	// Create Redis client options
-	options := &redis.Options{
-		Addr:     fmt.Sprintf("%s:%s", redisHost, redisPort),
-		Password: redisPassword,
-		DB:       redisDB,
-	}
-
-	// Configure TLS if enabled
-	if tlsEnabled {
-		// For TLS connections, we'll use a basic TLS config
-		// In production, you might want to configure certificates
-		options.TLSConfig = &tls.Config{
-			ServerName: redisHost,
-			// InsecureSkipVerify: true, // Only for testing - don't use in production
-		}
-	}
-
 	// Create Redis client
-	s.redisClient = redis.NewClient(options)
+	s.redisClient = NewRedisClient(redisHost, redisPort, redisPassword, tlsEnabled)
 
-	// Test the connection
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	// Configure retry settings
+	maxRetries := getEnvIntOrDefault("MAX_RETRIES", 5)
+	retryDelay := time.Duration(getEnvIntOrDefault("RETRY_DELAY_SECONDS", 5)) * time.Second
+	maxRetryDelay := time.Duration(getEnvIntOrDefault("MAX_RETRY_DELAY_SECONDS", 300)) * time.Second
+	s.redisClient.SetRetryConfig(maxRetries, retryDelay, maxRetryDelay)
 
-	if err := s.redisClient.Ping(ctx).Err(); err != nil {
-		return fmt.Errorf("failed to connect to Redis: %v", err)
+	// Get backup configuration
+	s.backupDir = getEnvOrDefault("BACKUP_DIR", "/data")
+
+	// S3 configuration
+	s.s3Bucket = os.Getenv("S3_BUCKET")
+	s.s3Enabled = s.s3Bucket != ""
+
+	// Ensure backup directory exists
+	if err := os.MkdirAll(s.backupDir, 0755); err != nil {
+		return fmt.Errorf("failed to create backup directory: %v", err)
 	}
 
-	tlsStatus := ""
-	if tlsEnabled {
-		tlsStatus = " (TLS enabled)"
-	}
-	fmt.Printf("Successfully connected to Redis at %s:%s%s\n", redisHost, redisPort, tlsStatus)
+	fmt.Printf("Backup service initialized - Redis: %s:%s, TLS: %v, Dir: %s, S3: %v\n",
+		redisHost, redisPort, tlsEnabled, s.backupDir, s.s3Enabled)
 	return nil
 }
 
 func (s *BackupService) Start(ctx context.Context) error {
-	// timer and context setup - ping every 10 seconds for now
-	timer := time.NewTicker(10 * time.Second)
-	defer timer.Stop()
-
-	fmt.Println("Backup service started, pinging Redis every 10 seconds...")
-
 	for {
 		select {
 		case <-ctx.Done():
 			fmt.Println("Backup service shutting down...")
 			return ctx.Err()
-		case <-timer.C:
-			// Ping Redis to check connectivity
-			if err := s.pingRedis(); err != nil {
-				fmt.Printf("Redis ping failed: %v\n", err)
-			} else {
-				fmt.Println("Redis ping successful")
+		default:
+			if err := s.performBackupCycle(); err != nil {
+				fmt.Printf("Backup cycle failed: %v\n", err)
+
+				// Try graceful reconnect
+				if reconnectErr := s.gracefulReconnect(); reconnectErr != nil {
+					fmt.Printf("Graceful reconnect failed: %v\n", reconnectErr)
+				}
+
+				fmt.Println("Retrying in 30 seconds...")
+				time.Sleep(30 * time.Second)
+				continue
 			}
 		}
 	}
 }
 
-func (s *BackupService) pingRedis() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+func (s *BackupService) performBackupCycle() error {
+	fmt.Println("Starting backup cycle...")
 
-	// Ping Redis
-	result := s.redisClient.Ping(ctx)
-	if err := result.Err(); err != nil {
-		return fmt.Errorf("ping failed: %v", err)
+	// Step 1: Connect to Redis
+	if err := s.redisClient.Connect(); err != nil {
+		return fmt.Errorf("failed to connect to Redis: %v", err)
+	}
+	defer s.redisClient.Close()
+
+	// Step 2: Authenticate if password is provided
+	if err := s.redisClient.Authenticate(); err != nil {
+		return fmt.Errorf("authentication failed: %v", err)
 	}
 
-	// Get some basic Redis info
-	info := s.redisClient.Info(ctx, "server")
-	if err := info.Err(); err != nil {
-		fmt.Printf("Warning: Could not get Redis info: %v\n", err)
-	} else {
-		// Extract Redis version from info (optional)
-		infoStr := info.Val()
-		fmt.Printf("Redis connection healthy. Info: %s\n", infoStr[:min(100, len(infoStr))])
+	// Step 3: Send PSYNC command and handle full resync
+	replInfo, err := s.redisClient.SendPSYNC()
+	if err != nil {
+		return fmt.Errorf("PSYNC failed: %v", err)
+	}
+
+	s.replID = replInfo.ID
+	s.replOffset = replInfo.Offset
+	fmt.Printf("Starting full resync - ID: %s, Offset: %d\n", s.replID, s.replOffset)
+
+	// Step 4: Read and save RDB snapshot
+	rdbFile, err := s.readRDB()
+	if err != nil {
+		return fmt.Errorf("failed to read RDB: %v", err)
+	}
+	fmt.Printf("RDB snapshot saved to: %s\n", rdbFile)
+
+	// Step 5: Upload RDB to S3 if enabled
+	if s.s3Enabled {
+		if err := s.uploadToS3(rdbFile); err != nil {
+			fmt.Printf("Warning: Failed to upload RDB to S3: %v\n", err)
+			// Don't fail the backup cycle for S3 upload failures
+		}
+	}
+
+	// Step 6: Read command stream and save to AOF
+	aofFile, err := s.readCommandStream()
+	if err != nil {
+		return fmt.Errorf("command stream failed: %v", err)
+	}
+	fmt.Printf("AOF stream saved to: %s\n", aofFile)
+
+	// Step 7: Upload AOF to S3 if enabled
+	if s.s3Enabled {
+		if err := s.uploadToS3(aofFile); err != nil {
+			fmt.Printf("Warning: Failed to upload AOF to S3: %v\n", err)
+			// Don't fail the backup cycle for S3 upload failures
+		}
 	}
 
 	return nil
+}
+
+func (s *BackupService) readRDB() (string, error) {
+	// Use the RedisClient to read RDB snapshot
+	rdbData, err := s.redisClient.ReadRDBSnapshot()
+	if err != nil {
+		return "", fmt.Errorf("failed to read RDB data: %v", err)
+	}
+
+	// Create RDB file
+	timestamp := time.Now().Format("20060102-150405")
+	rdbPath := filepath.Join(s.backupDir, fmt.Sprintf("dump-%s.rdb", timestamp))
+	rdbFile, err := os.Create(rdbPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to create RDB file: %v", err)
+	}
+	defer rdbFile.Close()
+
+	// Write RDB data to file
+	written, err := rdbFile.Write(rdbData)
+	if err != nil {
+		return "", fmt.Errorf("failed to write RDB data: %v", err)
+	}
+
+	fmt.Printf("RDB snapshot saved successfully (%d bytes)\n", written)
+	return rdbPath, nil
+}
+
+func (s *BackupService) readCommandStream() (string, error) {
+	// Create AOF file for command stream
+	timestamp := time.Now().Format("20060102-150405")
+	aofPath := filepath.Join(s.backupDir, fmt.Sprintf("appendonly-%s.aof", timestamp))
+	aofFile, err := os.Create(aofPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to create AOF file: %v", err)
+	}
+	defer aofFile.Close()
+
+	fmt.Println("Starting to read command stream...")
+	commandCount := 0
+
+	for {
+		// Read RESP commands from the replication stream using RedisClient
+		command, err := s.redisClient.ReadRESPCommand()
+		if err != nil {
+			if err == io.EOF {
+				fmt.Println("Redis connection closed")
+				break
+			}
+			return "", fmt.Errorf("failed to read command: %v", err)
+		}
+
+		// Write command to AOF file
+		if _, err := aofFile.WriteString(command); err != nil {
+			return "", fmt.Errorf("failed to write to AOF: %v", err)
+		}
+
+		commandCount++
+		if commandCount%100 == 0 {
+			fmt.Printf("Processed %d commands...\n", commandCount)
+			aofFile.Sync() // Flush to disk periodically
+		}
+	}
+
+	fmt.Printf("Command stream ended. Total commands processed: %d\n", commandCount)
+	return aofPath, nil
+}
+
+// uploadToS3 uploads a file to S3 bucket using AWS CLI
+func (s *BackupService) uploadToS3(filePath string) error {
+	if !s.s3Enabled {
+		return nil
+	}
+
+	// Use the enhanced S3 upload function
+	return s.uploadToS3Enhanced(filePath)
+}
+
+// gracefulReconnect handles reconnection and restart of backup cycle
+func (s *BackupService) gracefulReconnect() error {
+	fmt.Println("Attempting graceful reconnect...")
+	s.redisClient.Close()
+
+	// Clean up old files since we need a fresh full resync
+	if err := s.cleanupOldBackups(); err != nil {
+		fmt.Printf("Warning: Failed to cleanup old backups: %v\n", err)
+	}
+
+	time.Sleep(5 * time.Second) // Wait before reconnecting
+	return nil
+}
+
+// cleanupOldBackups removes old backup files to save disk space
+func (s *BackupService) cleanupOldBackups() error {
+	maxAge := time.Duration(getEnvIntOrDefault("BACKUP_RETENTION_HOURS", 24)) * time.Hour
+	maxFiles := getEnvIntOrDefault("BACKUP_MAX_FILES", 10)
+
+	fmt.Printf("Cleaning up backups older than %v or keeping only %d files...\n", maxAge, maxFiles)
+
+	files, err := s.getBackupFiles()
+	if err != nil {
+		return fmt.Errorf("failed to get backup files: %v", err)
+	}
+
+	filesToDelete := s.getFilesToDeleteByAge(files, maxAge)
+	filesToDelete = append(filesToDelete, s.getFilesToDeleteByCount(files, filesToDelete, maxFiles)...)
+
+	return s.deleteFiles(filesToDelete)
+}
+
+// getFilesToDeleteByAge returns files older than maxAge
+func (s *BackupService) getFilesToDeleteByAge(files []string, maxAge time.Duration) []string {
+	now := time.Now()
+	var filesToDelete []string
+
+	for _, file := range files {
+		info, err := os.Stat(file)
+		if err != nil {
+			continue
+		}
+
+		if now.Sub(info.ModTime()) > maxAge {
+			filesToDelete = append(filesToDelete, file)
+		}
+	}
+
+	return filesToDelete
+}
+
+// getFilesToDeleteByCount returns oldest files to keep only maxFiles
+func (s *BackupService) getFilesToDeleteByCount(files, alreadyDeleting []string, maxFiles int) []string {
+	remaining := s.getRemainingFiles(files, alreadyDeleting)
+
+	excess := len(remaining) - maxFiles
+	if excess <= 0 {
+		return []string{}
+	}
+
+	// Return the oldest files
+	return remaining[:excess]
+}
+
+// getRemainingFiles returns files not already marked for deletion
+func (s *BackupService) getRemainingFiles(files, alreadyDeleting []string) []string {
+	var remaining []string
+
+	for _, file := range files {
+		if !s.containsString(alreadyDeleting, file) {
+			remaining = append(remaining, file)
+		}
+	}
+
+	return remaining
+}
+
+// deleteFiles removes the specified files
+func (s *BackupService) deleteFiles(filesToDelete []string) error {
+	for _, file := range filesToDelete {
+		if err := os.Remove(file); err != nil {
+			fmt.Printf("Warning: Failed to delete %s: %v\n", file, err)
+		} else {
+			fmt.Printf("Deleted old backup: %s\n", filepath.Base(file))
+		}
+	}
+	return nil
+}
+
+// containsString checks if a slice contains a string
+func (s *BackupService) containsString(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}
+
+// getBackupFiles returns a list of all backup files in the backup directory
+func (s *BackupService) getBackupFiles() ([]string, error) {
+	files := []string{}
+
+	err := filepath.Walk(s.backupDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if !info.IsDir() {
+			// Check if it's a backup file (RDB or AOF)
+			if strings.HasSuffix(path, ".rdb") || strings.HasSuffix(path, ".aof") {
+				files = append(files, path)
+			}
+		}
+
+		return nil
+	})
+
+	return files, err
 }
 
 // Helper functions for environment variables
@@ -152,6 +359,7 @@ func getEnvOrDefault(key, defaultValue string) string {
 	return defaultValue
 }
 
+// Helper function for min
 func getEnvIntOrDefault(key string, defaultValue int) int {
 	if value := os.Getenv(key); value != "" {
 		if intValue, err := strconv.Atoi(value); err == nil {
@@ -159,12 +367,4 @@ func getEnvIntOrDefault(key string, defaultValue int) int {
 		}
 	}
 	return defaultValue
-}
-
-// Helper function for min
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
