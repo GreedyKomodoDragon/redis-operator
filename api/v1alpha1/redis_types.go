@@ -516,14 +516,11 @@ type PodSpec struct {
 
 // RedisBackupStorage defines backup storage configuration
 type RedisBackupStorage struct {
-	// Type specifies the backup storage type (s3, gcs, azure, pvc)
+	// Type specifies the backup storage type (s3)
 	Type string `json:"type"`
 
 	// S3 specifies S3 storage configuration
 	S3 *RedisS3Storage `json:"s3,omitempty"`
-
-	// PVC specifies PVC storage configuration
-	PVC *RedisPVCStorage `json:"pvc,omitempty"`
 }
 
 // RedisS3Storage defines S3 storage configuration
@@ -539,15 +536,6 @@ type RedisS3Storage struct {
 
 	// SecretName specifies the secret containing S3 credentials
 	SecretName string `json:"secretName"`
-}
-
-// RedisPVCStorage defines PVC storage configuration
-type RedisPVCStorage struct {
-	// Size specifies the PVC size
-	Size resource.Quantity `json:"size"`
-
-	// StorageClassName specifies the storage class
-	StorageClassName *string `json:"storageClassName,omitempty"`
 }
 
 // RedisStatus defines the observed state of Redis.
