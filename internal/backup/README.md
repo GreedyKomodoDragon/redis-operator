@@ -40,7 +40,12 @@ The service is configured through environment variables:
 #### S3 Upload (Optional)
 - `S3_BUCKET`: S3 bucket name for uploads
 - `AWS_REGION`: AWS region (default: us-east-1)
-- AWS credentials via standard AWS environment variables or IAM roles
+- `AWS_ENDPOINT_URL`: Custom S3 endpoint (for S3-compatible services like MinIO)
+- `AWS_ACCESS_KEY_ID`: AWS access key ID
+- `AWS_SECRET_ACCESS_KEY`: AWS secret access key
+- Alternatively, use IAM roles, EC2 instance profiles, or other AWS credential providers
+
+**Note**: The S3 uploader now uses the AWS SDK Go v2 for improved performance and reliability, replacing the previous AWS CLI dependency.
 
 ## How It Works
 
@@ -97,9 +102,12 @@ The backup service is now cleanly separated into distinct components:
 - Coordinates backup lifecycle
 
 ### S3Uploader (`s3_upload.go`)
-- AWS S3 upload functionality using AWS CLI
-- Error handling and timeout management
-- Proper S3 key organization
+- AWS S3 upload functionality using AWS SDK Go v2
+- Support for custom S3 endpoints (MinIO, etc.)
+- Automatic credential detection (environment variables, IAM roles, EC2 instance profiles)
+- Proper error handling and timeout management
+- Organized S3 key structure with replication ID prefixes
+- File metadata tracking (upload timestamp, source)
 
 ## Usage
 
@@ -190,3 +198,50 @@ The service provides detailed logging for:
 3. **AWS Credentials**: Use IAM roles for S3 access in production
 4. **Monitoring**: Set up alerts for backup failures
 5. **Testing**: Regularly test backup restore procedures
+
+## Testing
+
+### Unit Tests
+The backup service includes comprehensive unit tests covering:
+- Redis client functionality (connection, authentication, PSYNC)
+- S3 uploader configuration and basic functionality
+- Backup service orchestration logic
+
+### Integration Tests
+#### Redis Client Integration Tests
+Uses testcontainers with real Redis instances to test:
+- Basic connection functionality
+- Authentication with and without passwords
+- PSYNC protocol handling and RDB snapshot reading
+- Connection retry logic with exponential backoff
+- RESP command parsing
+
+#### S3 Integration Tests
+Uses testcontainers with MinIO (S3-compatible storage) to test:
+- **Single file upload**: Verifies basic S3 upload functionality with metadata
+- **Multiple file upload**: Tests uploading multiple backup files (RDB, AOF, config)
+- **Error handling**: Tests behavior with non-existent buckets and files
+- **Backup service integration**: End-to-end test of the backup service S3 upload
+- **Timeout handling**: Verifies proper context timeout behavior
+
+#### Running Tests
+```bash
+# Run all tests
+go test ./internal/backup/...
+
+# Run only Redis client tests
+go test ./internal/backup/... -run "TestRedisClient.*"
+
+# Run only S3 integration tests
+go test ./internal/backup/... -run "TestS3.*Integration"
+
+# Run with verbose output
+go test ./internal/backup/... -v
+```
+
+#### Test Dependencies
+- **Docker**: Required for testcontainers
+- **Redis container**: `redis:7-alpine`
+- **MinIO container**: `minio/minio:RELEASE.2024-01-16T16-07-38Z`
+
+The integration tests automatically handle container lifecycle (start, configure, cleanup) and provide realistic testing scenarios using actual Redis and S3-compatible storage.
