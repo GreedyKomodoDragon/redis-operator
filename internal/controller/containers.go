@@ -9,10 +9,6 @@ import (
 	koncachev1alpha1 "github.com/GreedyKomodoDragon/redis-operator/api/v1alpha1"
 )
 
-const (
-	RedisBackupVolumeName = "redis-backup-volume"
-)
-
 // BuildRedisContainer builds the Redis container specification
 func BuildRedisContainer(redis *koncachev1alpha1.Redis, port int32) corev1.Container {
 	// Build container ports based on TLS configuration
@@ -275,10 +271,6 @@ func BuildBackupContainer(redis *koncachev1alpha1.Redis) corev1.Container {
 			Name:  "MAX_RETRY_DELAY_SECONDS",
 			Value: "300",
 		},
-		{
-			Name:  "BACKUP_DIR",
-			Value: "/data",
-		},
 	}...)
 
 	// Add S3 configuration if backup S3 settings are configured
@@ -327,6 +319,18 @@ func BuildBackupContainer(redis *koncachev1alpha1.Redis) corev1.Container {
 						},
 					},
 				},
+				{
+					Name: "AWS_ENDPOINT_URL",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: redis.Spec.Backup.Storage.S3.SecretName,
+							},
+							Key:      "endpoint",
+							Optional: &[]bool{true}[0], // Make endpoint optional
+						},
+					},
+				},
 			}...)
 		}
 	}
@@ -337,12 +341,7 @@ func BuildBackupContainer(redis *koncachev1alpha1.Redis) corev1.Container {
 		ImagePullPolicy: redis.Spec.ImagePullPolicy,
 		// Use the image's default entrypoint (/backup)
 		Env: envVars,
-		VolumeMounts: []corev1.VolumeMount{
-			{
-				Name:      RedisBackupVolumeName,
-				MountPath: "/data",
-			},
-		},
+		// No volume mounts needed for streaming backup
 	}
 
 	return backupContainer

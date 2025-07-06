@@ -2263,22 +2263,6 @@ spec:
                   storage:
                     description: Storage specifies backup storage configuration
                     properties:
-                      pvc:
-                        description: PVC specifies PVC storage configuration
-                        properties:
-                          size:
-                            anyOf:
-                            - type: integer
-                            - type: string
-                            description: Size specifies the PVC size
-                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                            x-kubernetes-int-or-string: true
-                          storageClassName:
-                            description: StorageClassName specifies the storage class
-                            type: string
-                        required:
-                        - size
-                        type: object
                       s3:
                         description: S3 specifies S3 storage configuration
                         properties:
@@ -2300,8 +2284,7 @@ spec:
                         - secretName
                         type: object
                       type:
-                        description: Type specifies the backup storage type (s3, gcs,
-                          azure, pvc)
+                        description: Type specifies the backup storage type (s3)
                         type: string
                     required:
                     - type

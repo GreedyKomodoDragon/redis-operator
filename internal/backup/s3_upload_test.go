@@ -105,40 +105,6 @@ func TestS3UploaderConfigurationFields(t *testing.T) {
 	assert.Equal(t, "secret123", config.SecretAccessKey)
 }
 
-func TestUploadToS3EnhancedDisabled(t *testing.T) {
-	// Test that when S3 is disabled, the method returns nil without error
-	service := &BackupService{
-		s3Enabled: false,
-	}
-
-	err := service.uploadToS3Enhanced("/some/file/path")
-	require.NoError(t, err, "uploadToS3Enhanced should return nil when S3 is disabled")
-}
-
-func TestUploadToS3EnhancedConfiguration(t *testing.T) {
-	// Test that S3 configuration is built correctly from environment variables
-	service := &BackupService{
-		s3Enabled: true,
-		s3Bucket:  testBucket,
-		replID:    "test-repl-id-123",
-	}
-
-	// Set some environment variables for testing
-	t.Setenv("AWS_REGION", "eu-west-1")
-	t.Setenv("AWS_ENDPOINT_URL", "https://minio.example.com")
-	t.Setenv("AWS_ACCESS_KEY_ID", "test-key")
-	t.Setenv("AWS_SECRET_ACCESS_KEY", "test-secret")
-
-	// This will fail because we don't have a real file
-	// But we can verify that the configuration logic is working
-	err := service.uploadToS3Enhanced("/nonexistent/file")
-
-	// We expect an error because the file doesn't exist
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "S3 upload failed")
-	assert.Contains(t, err.Error(), "no such file or directory")
-}
-
 func TestS3UploaderIntegration(t *testing.T) {
 	ctx := context.Background()
 

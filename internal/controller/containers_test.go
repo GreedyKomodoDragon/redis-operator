@@ -114,14 +114,14 @@ func TestBuildBackupContainer(t *testing.T) {
 						Enabled: true,
 						Image:   "koncache/redis-backup:latest",
 						Storage: koncachev1alpha1.RedisBackupStorage{
-							Type: "pvc",
+							// No S3 configuration
 						},
 					},
 				},
 			},
 			expectedEnvVars: []string{
 				"REDIS_HOST", "REDIS_PORT", "REDIS_DB",
-				"MAX_RETRIES", "RETRY_DELAY_SECONDS", "MAX_RETRY_DELAY_SECONDS", "BACKUP_DIR",
+				"MAX_RETRIES", "RETRY_DELAY_SECONDS", "MAX_RETRY_DELAY_SECONDS",
 			},
 		},
 		{
@@ -151,7 +151,7 @@ func TestBuildBackupContainer(t *testing.T) {
 			},
 			expectedEnvVars: []string{
 				"REDIS_HOST", "REDIS_PORT", "REDIS_DB",
-				"MAX_RETRIES", "RETRY_DELAY_SECONDS", "MAX_RETRY_DELAY_SECONDS", "BACKUP_DIR",
+				"MAX_RETRIES", "RETRY_DELAY_SECONDS", "MAX_RETRY_DELAY_SECONDS",
 				"S3_BUCKET", "AWS_REGION", "S3_PREFIX", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
 			},
 		},
@@ -182,14 +182,20 @@ func TestBuildBackupContainer(t *testing.T) {
 						Enabled: true,
 						Image:   "koncache/redis-backup:latest",
 						Storage: koncachev1alpha1.RedisBackupStorage{
-							Type: "pvc",
+							Type: "s3",
+							S3: &koncachev1alpha1.RedisS3Storage{
+								Bucket:     "test-bucket",
+								Region:     "us-east-1",
+								SecretName: "s3-credentials",
+							},
 						},
 					},
 				},
 			},
 			expectedEnvVars: []string{
 				"REDIS_HOST", "REDIS_PORT", "REDIS_DB", "REDIS_PASSWORD", "REDIS_TLS_ENABLED",
-				"MAX_RETRIES", "RETRY_DELAY_SECONDS", "MAX_RETRY_DELAY_SECONDS", "BACKUP_DIR",
+				"MAX_RETRIES", "RETRY_DELAY_SECONDS", "MAX_RETRY_DELAY_SECONDS",
+				"S3_BUCKET", "AWS_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
 			},
 		},
 	}
@@ -235,7 +241,7 @@ func TestBuildBackupContainer(t *testing.T) {
 			assert.Equal(t, "5", envVarMap["MAX_RETRIES"].Value)
 			assert.Equal(t, "5", envVarMap["RETRY_DELAY_SECONDS"].Value)
 			assert.Equal(t, "300", envVarMap["MAX_RETRY_DELAY_SECONDS"].Value)
-			assert.Equal(t, "/data", envVarMap["BACKUP_DIR"].Value)
+			// BACKUP_DIR is no longer used for streaming backup
 
 			// Verify S3 configuration if applicable
 			if tt.redis.Spec.Backup.Storage.Type == "s3" && tt.redis.Spec.Backup.Storage.S3 != nil {
@@ -266,10 +272,8 @@ func TestBuildBackupContainer(t *testing.T) {
 				assert.NotNil(t, envVarMap["REDIS_PASSWORD"].ValueFrom.SecretKeyRef)
 			}
 
-			// Test volume mounts
-			require.Len(t, result.VolumeMounts, 1, "Backup container should have exactly 1 volume mount")
-			assert.Equal(t, controller.RedisBackupVolumeName, result.VolumeMounts[0].Name)
-			assert.Equal(t, "/data", result.VolumeMounts[0].MountPath)
+			// Test volume mounts - no longer needed for streaming backup
+			require.Len(t, result.VolumeMounts, 0, "Backup container should have no volume mounts for streaming backup")
 		})
 	}
 }

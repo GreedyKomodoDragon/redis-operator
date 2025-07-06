@@ -553,11 +553,11 @@ func (s *StandaloneController) backupStatefulSetForRedis(redis *koncachev1alpha1
 			Labels:    labels,
 		},
 		Spec: appsv1.StatefulSetSpec{
-			Replicas:             &single,
-			ServiceName:          redis.Name + "-backup",
-			Selector:             &metav1.LabelSelector{MatchLabels: labels},
-			Template:             BuildBackupPodTemplateForRedis(redis),
-			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{BuildBackupVolumeClaimTemplate(redis)},
+			Replicas:    &single,
+			ServiceName: redis.Name + "-backup",
+			Selector:    &metav1.LabelSelector{MatchLabels: labels},
+			Template:    BuildBackupPodTemplateForRedis(redis),
+			// No volume claim templates needed for streaming backup
 			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
 				Type: appsv1.RollingUpdateStatefulSetStrategyType,
 			},
@@ -722,26 +722,4 @@ func (s *StandaloneController) hasVolumeClaimTemplateChanges(existing, desired *
 	}
 
 	return false
-}
-
-// handleVolumeClaimTemplateMismatch handles the case where VolumeClaimTemplates differ
-// and cannot be updated automatically. This requires manual intervention or StatefulSet recreation.
-func (s *StandaloneController) handleVolumeClaimTemplateMismatch(ctx context.Context, redis *koncachev1alpha1.Redis, existing, desired *appsv1.StatefulSet) error {
-	log := logf.FromContext(ctx)
-
-	log.Info("VolumeClaimTemplate mismatch detected - manual intervention required",
-		"StatefulSet.Name", existing.Name,
-		"StatefulSet.Namespace", existing.Namespace,
-		"Issue", "VolumeClaimTemplates cannot be updated in existing StatefulSets")
-
-	// TODO: In the future, we could implement:
-	// 1. Automated backup and restore procedures
-	// 2. StatefulSet recreation with data migration
-	// 3. Event emission to notify administrators
-	// 4. Status updates to reflect the issue
-
-	// For now, we'll just emit an event to notify administrators
-	// This would require event recording capability which should be added to the controller
-
-	return nil
 }

@@ -1,21 +1,21 @@
 package backup
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
-	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 )
 
 type BackupService struct {
-	backupDir   string
 	s3Bucket    string
 	s3Enabled   bool
 	redisClient *RedisClient
+	s3Uploader  *S3Uploader
 
 	// Replication state
 	replID     string
@@ -57,32 +57,51 @@ func (s *BackupService) initialize() error {
 	maxRetryDelay := time.Duration(getEnvIntOrDefault("MAX_RETRY_DELAY_SECONDS", 300)) * time.Second
 	s.redisClient.SetRetryConfig(maxRetries, retryDelay, maxRetryDelay)
 
-	// Get backup configuration
-	s.backupDir = getEnvOrDefault("BACKUP_DIR", "/data")
-
-	// S3 configuration
+	// S3 configuration - required for backup
 	s.s3Bucket = os.Getenv("S3_BUCKET")
 	s.s3Enabled = s.s3Bucket != ""
 
-	// Ensure backup directory exists
-	if err := os.MkdirAll(s.backupDir, 0755); err != nil {
-		return fmt.Errorf("failed to create backup directory: %v", err)
+	if !s.s3Enabled {
+		return fmt.Errorf("S3_BUCKET environment variable is required - backup service only supports S3 storage")
 	}
 
-	fmt.Printf("Backup service initialized - Redis: %s:%s, TLS: %v, Dir: %s, S3: %v\n",
-		redisHost, redisPort, tlsEnabled, s.backupDir, s.s3Enabled)
+	// Initialize S3 uploader
+	s3Config := S3Config{
+		Bucket:          s.s3Bucket,
+		Region:          getEnvOrDefault("AWS_REGION", "us-east-1"),
+		Endpoint:        os.Getenv("AWS_ENDPOINT_URL"),
+		AccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
+		SecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	uploader, err := NewS3Uploader(ctx, s3Config)
+	if err != nil {
+		return fmt.Errorf("failed to create S3 uploader: %v", err)
+	}
+	s.s3Uploader = uploader
+
+	fmt.Printf("Backup service initialized - Redis: %s:%s, TLS: %v, S3: %v\n",
+		redisHost, redisPort, tlsEnabled, s.s3Enabled)
 	return nil
 }
 
 func (s *BackupService) Start(ctx context.Context) error {
+	backupCount := 0
+
 	for {
 		select {
 		case <-ctx.Done():
 			fmt.Println("Backup service shutting down...")
 			return ctx.Err()
 		default:
+			backupCount++
+			fmt.Printf("Starting backup cycle #%d\n", backupCount)
+
 			if err := s.performBackupCycle(); err != nil {
-				fmt.Printf("Backup cycle failed: %v\n", err)
+				fmt.Printf("Backup cycle #%d failed: %v\n", backupCount, err)
 
 				// Try graceful reconnect
 				if reconnectErr := s.gracefulReconnect(); reconnectErr != nil {
@@ -92,6 +111,18 @@ func (s *BackupService) Start(ctx context.Context) error {
 				fmt.Println("Retrying in 30 seconds...")
 				time.Sleep(30 * time.Second)
 				continue
+			}
+
+			fmt.Printf("Backup cycle #%d completed successfully\n", backupCount)
+
+			// For continuous backup, wait before next cycle
+			// In production, this might be controlled by a schedule
+			fmt.Println("Waiting 5 minutes before next backup cycle...")
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(5 * time.Minute):
+				// Continue to next backup cycle
 			}
 		}
 	}
@@ -121,234 +152,181 @@ func (s *BackupService) performBackupCycle() error {
 	s.replOffset = replInfo.Offset
 	fmt.Printf("Starting full resync - ID: %s, Offset: %d\n", s.replID, s.replOffset)
 
-	// Step 4: Read and save RDB snapshot
-	rdbFile, err := s.readRDB()
-	if err != nil {
-		return fmt.Errorf("failed to read RDB: %v", err)
-	}
-	fmt.Printf("RDB snapshot saved to: %s\n", rdbFile)
-
-	// Step 5: Upload RDB to S3 if enabled
-	if s.s3Enabled {
-		if err := s.uploadToS3(rdbFile); err != nil {
-			fmt.Printf("Warning: Failed to upload RDB to S3: %v\n", err)
-			// Don't fail the backup cycle for S3 upload failures
-		}
+	// Step 4: Stream RDB snapshot directly to S3
+	if err := s.streamRDBToS3(); err != nil {
+		return fmt.Errorf("failed to stream RDB to S3: %v", err)
 	}
 
-	// Step 6: Read command stream and save to AOF
-	aofFile, err := s.readCommandStream()
-	if err != nil {
-		return fmt.Errorf("command stream failed: %v", err)
-	}
-	fmt.Printf("AOF stream saved to: %s\n", aofFile)
-
-	// Step 7: Upload AOF to S3 if enabled
-	if s.s3Enabled {
-		if err := s.uploadToS3(aofFile); err != nil {
-			fmt.Printf("Warning: Failed to upload AOF to S3: %v\n", err)
-			// Don't fail the backup cycle for S3 upload failures
-		}
+	// Step 5: Stream command stream directly to S3
+	if err := s.streamCommandsToS3(); err != nil {
+		return fmt.Errorf("failed to stream commands to S3: %v", err)
 	}
 
 	return nil
 }
 
-func (s *BackupService) readRDB() (string, error) {
-	// Use the RedisClient to read RDB snapshot
+func (s *BackupService) streamRDBToS3() error {
+	fmt.Println("Streaming RDB snapshot directly to S3...")
+
+	// Read RDB data from Redis
 	rdbData, err := s.redisClient.ReadRDBSnapshot()
 	if err != nil {
-		return "", fmt.Errorf("failed to read RDB data: %v", err)
+		return fmt.Errorf("failed to read RDB data: %v", err)
 	}
 
-	// Create RDB file
+	// Create a reader from the RDB data
+	reader := bytes.NewReader(rdbData)
+
+	// Generate S3 key
 	timestamp := time.Now().Format("20060102-150405")
-	rdbPath := filepath.Join(s.backupDir, fmt.Sprintf("dump-%s.rdb", timestamp))
-	rdbFile, err := os.Create(rdbPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to create RDB file: %v", err)
-	}
-	defer rdbFile.Close()
+	s3Key := fmt.Sprintf("redis-backups/%s/dump-%s.rdb", s.replID, timestamp)
 
-	// Write RDB data to file
-	written, err := rdbFile.Write(rdbData)
-	if err != nil {
-		return "", fmt.Errorf("failed to write RDB data: %v", err)
+	// Metadata for the backup
+	metadata := map[string]string{
+		"uploaded-by":        "redis-operator",
+		"timestamp":          fmt.Sprintf("%d", time.Now().Unix()),
+		"replication-id":     s.replID,
+		"replication-offset": fmt.Sprintf("%d", s.replOffset),
+		"backup-type":        "rdb",
 	}
 
-	fmt.Printf("RDB snapshot saved successfully (%d bytes)\n", written)
-	return rdbPath, nil
+	// Upload stream to S3 with progress tracking
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	location, err := s.s3Uploader.UploadStreamWithProgress(ctx, reader, s3Key, metadata, func(bytes int64) {
+		if bytes%(1024*1024) == 0 { // Log every MB
+			fmt.Printf("Uploaded RDB: %d bytes\n", bytes)
+		}
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to upload RDB to S3: %v", err)
+	}
+
+	fmt.Printf("RDB snapshot successfully uploaded to S3: %s (%d bytes)\n", location, len(rdbData))
+	return nil
 }
 
-func (s *BackupService) readCommandStream() (string, error) {
-	// Create AOF file for command stream
-	timestamp := time.Now().Format("20060102-150405")
-	aofPath := filepath.Join(s.backupDir, fmt.Sprintf("appendonly-%s.aof", timestamp))
-	aofFile, err := os.Create(aofPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to create AOF file: %v", err)
-	}
-	defer aofFile.Close()
+func (s *BackupService) streamCommandsToS3() error {
+	fmt.Println("Starting command stream backup to S3...")
 
-	fmt.Println("Starting to read command stream...")
+	// Create a pipe for streaming commands
+	reader, writer := io.Pipe()
+
+	// Generate S3 key
+	timestamp := time.Now().Format("20060102-150405")
+	s3Key := fmt.Sprintf("redis-backups/%s/appendonly-%s.aof", s.replID, timestamp)
+
+	// Metadata for the backup
+	metadata := map[string]string{
+		"uploaded-by":        "redis-operator",
+		"timestamp":          fmt.Sprintf("%d", time.Now().Unix()),
+		"replication-id":     s.replID,
+		"replication-offset": fmt.Sprintf("%d", s.replOffset),
+		"backup-type":        "aof",
+	}
+
+	// Start S3 upload in a goroutine
+	uploadComplete := make(chan error, 1)
+	go s.uploadStreamToS3(reader, s3Key, metadata, uploadComplete)
+
+	// Stream commands to the pipe with timeout and keepalive handling
 	commandCount := 0
+	defer writer.Close()
+
+	// Use a shorter timeout to check for commands frequently
+	commandTimeout := 30 * time.Second
+	maxStreamDuration := 10 * time.Minute
+	keepaliveInterval := 60 * time.Second
+
+	streamStart := time.Now()
+	lastKeepalive := time.Now()
 
 	for {
-		// Read RESP commands from the replication stream using RedisClient
-		command, err := s.redisClient.ReadRESPCommand()
-		if err != nil {
-			if err == io.EOF {
-				fmt.Println("Redis connection closed")
-				break
-			}
-			return "", fmt.Errorf("failed to read command: %v", err)
+		// Check if we've exceeded the maximum stream duration
+		if time.Since(streamStart) > maxStreamDuration {
+			fmt.Printf("Maximum stream duration (%v) reached - completing backup\n", maxStreamDuration)
+			break
 		}
 
-		// Write command to AOF file
-		if _, err := aofFile.WriteString(command); err != nil {
-			return "", fmt.Errorf("failed to write to AOF: %v", err)
+		// Send keepalive if needed
+		if time.Since(lastKeepalive) > keepaliveInterval {
+			if err := s.redisClient.SendKeepAlive(); err != nil {
+				fmt.Printf("Keepalive failed: %v - ending stream\n", err)
+				break
+			}
+			lastKeepalive = time.Now()
+			fmt.Println("Sent keepalive to maintain Redis connection")
+		}
+
+		// Try to read a command with timeout
+		command, err := s.redisClient.ReadRESPCommandWithTimeout(commandTimeout)
+		if err != nil {
+			// Check if it's a timeout (which is expected with low traffic)
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				// Timeout is expected with low traffic - continue waiting
+				fmt.Printf("No commands received in %v - continuing to wait...\n", commandTimeout)
+				continue
+			}
+
+			// Check for connection closed
+			if err == io.EOF {
+				fmt.Println("Redis connection closed - attempting to complete backup gracefully")
+				break
+			}
+
+			// Other errors
+			fmt.Printf("Error reading command: %v - ending stream\n", err)
+			writer.CloseWithError(fmt.Errorf("failed to read command: %v", err))
+			break
+		}
+
+		// Successfully read a command - write it to the pipe
+		if _, err := writer.Write([]byte(command)); err != nil {
+			writer.CloseWithError(fmt.Errorf("failed to write command: %v", err))
+			break
 		}
 
 		commandCount++
 		if commandCount%100 == 0 {
-			fmt.Printf("Processed %d commands...\n", commandCount)
-			aofFile.Sync() // Flush to disk periodically
+			fmt.Printf("Streamed %d commands...\n", commandCount)
 		}
 	}
 
-	fmt.Printf("Command stream ended. Total commands processed: %d\n", commandCount)
-	return aofPath, nil
-}
-
-// uploadToS3 uploads a file to S3 bucket using AWS CLI
-func (s *BackupService) uploadToS3(filePath string) error {
-	if !s.s3Enabled {
-		return nil
+	// Wait for upload to complete
+	if err := <-uploadComplete; err != nil {
+		return err
 	}
 
-	// Use the enhanced S3 upload function
-	return s.uploadToS3Enhanced(filePath)
+	fmt.Printf("Command stream ended. Total commands processed: %d\n", commandCount)
+	return nil
 }
 
 // gracefulReconnect handles reconnection and restart of backup cycle
 func (s *BackupService) gracefulReconnect() error {
 	fmt.Println("Attempting graceful reconnect...")
+
+	// Close existing connection
 	s.redisClient.Close()
 
-	// Clean up old files since we need a fresh full resync
-	if err := s.cleanupOldBackups(); err != nil {
-		fmt.Printf("Warning: Failed to cleanup old backups: %v\n", err)
+	// Wait before reconnecting
+	time.Sleep(5 * time.Second)
+
+	// Try to reconnect
+	if err := s.redisClient.Connect(); err != nil {
+		return fmt.Errorf("failed to reconnect to Redis: %v", err)
 	}
 
-	time.Sleep(5 * time.Second) // Wait before reconnecting
+	// Test the connection
+	if err := s.redisClient.Authenticate(); err != nil {
+		s.redisClient.Close()
+		return fmt.Errorf("authentication failed after reconnect: %v", err)
+	}
+
+	fmt.Println("Successfully reconnected to Redis")
+	s.redisClient.Close() // Close for now, will reconnect in next cycle
 	return nil
-}
-
-// cleanupOldBackups removes old backup files to save disk space
-func (s *BackupService) cleanupOldBackups() error {
-	maxAge := time.Duration(getEnvIntOrDefault("BACKUP_RETENTION_HOURS", 24)) * time.Hour
-	maxFiles := getEnvIntOrDefault("BACKUP_MAX_FILES", 10)
-
-	fmt.Printf("Cleaning up backups older than %v or keeping only %d files...\n", maxAge, maxFiles)
-
-	files, err := s.getBackupFiles()
-	if err != nil {
-		return fmt.Errorf("failed to get backup files: %v", err)
-	}
-
-	filesToDelete := s.getFilesToDeleteByAge(files, maxAge)
-	filesToDelete = append(filesToDelete, s.getFilesToDeleteByCount(files, filesToDelete, maxFiles)...)
-
-	return s.deleteFiles(filesToDelete)
-}
-
-// getFilesToDeleteByAge returns files older than maxAge
-func (s *BackupService) getFilesToDeleteByAge(files []string, maxAge time.Duration) []string {
-	now := time.Now()
-	var filesToDelete []string
-
-	for _, file := range files {
-		info, err := os.Stat(file)
-		if err != nil {
-			continue
-		}
-
-		if now.Sub(info.ModTime()) > maxAge {
-			filesToDelete = append(filesToDelete, file)
-		}
-	}
-
-	return filesToDelete
-}
-
-// getFilesToDeleteByCount returns oldest files to keep only maxFiles
-func (s *BackupService) getFilesToDeleteByCount(files, alreadyDeleting []string, maxFiles int) []string {
-	remaining := s.getRemainingFiles(files, alreadyDeleting)
-
-	excess := len(remaining) - maxFiles
-	if excess <= 0 {
-		return []string{}
-	}
-
-	// Return the oldest files
-	return remaining[:excess]
-}
-
-// getRemainingFiles returns files not already marked for deletion
-func (s *BackupService) getRemainingFiles(files, alreadyDeleting []string) []string {
-	var remaining []string
-
-	for _, file := range files {
-		if !s.containsString(alreadyDeleting, file) {
-			remaining = append(remaining, file)
-		}
-	}
-
-	return remaining
-}
-
-// deleteFiles removes the specified files
-func (s *BackupService) deleteFiles(filesToDelete []string) error {
-	for _, file := range filesToDelete {
-		if err := os.Remove(file); err != nil {
-			fmt.Printf("Warning: Failed to delete %s: %v\n", file, err)
-		} else {
-			fmt.Printf("Deleted old backup: %s\n", filepath.Base(file))
-		}
-	}
-	return nil
-}
-
-// containsString checks if a slice contains a string
-func (s *BackupService) containsString(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
-	}
-	return false
-}
-
-// getBackupFiles returns a list of all backup files in the backup directory
-func (s *BackupService) getBackupFiles() ([]string, error) {
-	files := []string{}
-
-	err := filepath.Walk(s.backupDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if !info.IsDir() {
-			// Check if it's a backup file (RDB or AOF)
-			if strings.HasSuffix(path, ".rdb") || strings.HasSuffix(path, ".aof") {
-				files = append(files, path)
-			}
-		}
-
-		return nil
-	})
-
-	return files, err
 }
 
 // Helper functions for environment variables
@@ -359,7 +337,6 @@ func getEnvOrDefault(key, defaultValue string) string {
 	return defaultValue
 }
 
-// Helper function for min
 func getEnvIntOrDefault(key string, defaultValue int) int {
 	if value := os.Getenv(key); value != "" {
 		if intValue, err := strconv.Atoi(value); err == nil {
@@ -367,4 +344,25 @@ func getEnvIntOrDefault(key string, defaultValue int) int {
 		}
 	}
 	return defaultValue
+}
+
+func (s *BackupService) uploadStreamToS3(reader io.Reader, s3Key string, metadata map[string]string, uploadComplete chan<- error) {
+	defer close(uploadComplete)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	location, err := s.s3Uploader.UploadStreamWithProgress(ctx, reader, s3Key, metadata, func(bytes int64) {
+		if bytes%(1024*1024) == 0 { // Log every MB
+			fmt.Printf("Uploaded AOF: %d bytes\n", bytes)
+		}
+	})
+
+	if err != nil {
+		uploadComplete <- fmt.Errorf("failed to upload AOF to S3: %v", err)
+		return
+	}
+
+	fmt.Printf("AOF stream successfully uploaded to S3: %s\n", location)
+	uploadComplete <- nil
 }

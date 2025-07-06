@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -110,6 +111,52 @@ func (u *S3Uploader) UploadFile(ctx context.Context, filePath, keyPrefix string)
 
 	fmt.Printf("Successfully uploaded %s to %s\n", fileName, result.Location)
 	return nil
+}
+
+// UploadStream uploads data from an io.Reader directly to S3
+func (u *S3Uploader) UploadStream(ctx context.Context, reader io.Reader, s3Key string, metadata map[string]string) (string, error) {
+	// Upload the stream
+	result, err := u.uploader.Upload(ctx, &s3.PutObjectInput{
+		Bucket:   aws.String(u.bucket),
+		Key:      aws.String(s3Key),
+		Body:     reader,
+		Metadata: metadata,
+	})
+
+	if err != nil {
+		return "", fmt.Errorf("failed to upload stream to S3: %v", err)
+	}
+
+	return result.Location, nil
+}
+
+// UploadStreamWithProgress uploads data from an io.Reader to S3 with progress tracking
+func (u *S3Uploader) UploadStreamWithProgress(ctx context.Context, reader io.Reader, s3Key string, metadata map[string]string, progressCallback func(bytes int64)) (string, error) {
+	// Wrap the reader with progress tracking
+	progressReader := &ProgressReader{
+		Reader:   reader,
+		Callback: progressCallback,
+	}
+
+	return u.UploadStream(ctx, progressReader, s3Key, metadata)
+}
+
+// ProgressReader wraps an io.Reader to track progress
+type ProgressReader struct {
+	Reader   io.Reader
+	Callback func(bytes int64)
+	total    int64
+}
+
+func (pr *ProgressReader) Read(p []byte) (int, error) {
+	n, err := pr.Reader.Read(p)
+	if n > 0 {
+		pr.total += int64(n)
+		if pr.Callback != nil {
+			pr.Callback(pr.total)
+		}
+	}
+	return n, err
 }
 
 // uploadToS3Enhanced uploads a file to S3 using AWS SDK with proper error handling

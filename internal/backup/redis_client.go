@@ -269,9 +269,51 @@ func (r *RedisClient) readRESPBulkString() (string, error) {
 	return fmt.Sprintf("$%d\r\n%s", length, string(data)), nil
 }
 
+// SendKeepAlive sends a PING command to keep the connection alive
+func (r *RedisClient) SendKeepAlive() error {
+	if r.conn == nil {
+		return fmt.Errorf("not connected to Redis")
+	}
+
+	// Send PING command
+	_, err := r.conn.Write([]byte("PING\r\n"))
+	if err != nil {
+		return fmt.Errorf("failed to send keepalive: %v", err)
+	}
+
+	// Read the response (should be +PONG\r\n)
+	response, err := r.reader.ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("failed to read keepalive response: %v", err)
+	}
+
+	if !strings.HasPrefix(response, "+PONG") {
+		return fmt.Errorf("unexpected keepalive response: %s", response)
+	}
+
+	return nil
+}
+
 // IsConnected returns true if the client has an active connection
 func (r *RedisClient) IsConnected() bool {
 	return r.conn != nil
+}
+
+// ReadRESPCommandWithTimeout reads a RESP command with a timeout
+func (r *RedisClient) ReadRESPCommandWithTimeout(timeout time.Duration) (string, error) {
+	if r.conn == nil {
+		return "", fmt.Errorf("not connected to Redis")
+	}
+
+	// Set read deadline
+	if err := r.conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return "", fmt.Errorf("failed to set read deadline: %v", err)
+	}
+
+	// Clear deadline after reading
+	defer r.conn.SetReadDeadline(time.Time{})
+
+	return r.ReadRESPCommand()
 }
 
 // Close closes the Redis connection
