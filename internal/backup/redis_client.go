@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"strconv"
 	"strings"
@@ -54,7 +55,7 @@ func (r *RedisClient) SetRetryConfig(maxRetries int, retryDelay, maxRetryDelay t
 // Connect establishes a connection to Redis with retry logic
 func (r *RedisClient) Connect() error {
 	addr := net.JoinHostPort(r.host, r.port)
-	fmt.Printf("Connecting to Redis at %s...\n", addr)
+	slog.Info("Connecting to Redis", "address", addr)
 
 	conn, err := r.establishConnection(addr)
 	if err != nil {
@@ -62,7 +63,7 @@ func (r *RedisClient) Connect() error {
 	}
 
 	r.configureConnection(conn)
-	fmt.Println("Connected to Redis successfully")
+	slog.Info("Connected to Redis successfully")
 	return nil
 }
 
@@ -79,8 +80,11 @@ func (r *RedisClient) establishConnection(addr string) (net.Conn, error) {
 		}
 
 		if attempt < r.maxRetries-1 {
-			fmt.Printf("Connection attempt %d failed: %v. Retrying in %v...\n",
-				attempt+1, err, retryDelay)
+			slog.Warn("Connection attempt failed",
+				"attempt", attempt+1,
+				"error", err,
+				"retry_delay", retryDelay,
+			)
 			time.Sleep(retryDelay)
 
 			retryDelay *= 2
@@ -113,12 +117,12 @@ func (r *RedisClient) configureConnection(conn net.Conn) {
 	// Configure TCP keepalive for replication connections
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		if err := tcpConn.SetKeepAlive(true); err != nil {
-			fmt.Printf("Warning: Failed to enable TCP keepalive: %v\n", err)
+			slog.Warn("Failed to enable TCP keepalive", "error", err)
 		} else {
 			if err := tcpConn.SetKeepAlivePeriod(60 * time.Second); err != nil {
-				fmt.Printf("Warning: Failed to set TCP keepalive period: %v\n", err)
+				slog.Warn("Failed to set TCP keepalive period", "error", err)
 			} else {
-				fmt.Println("TCP keepalive enabled for replication connection")
+				slog.Debug("TCP keepalive enabled for replication connection")
 			}
 		}
 	}
@@ -148,7 +152,7 @@ func (r *RedisClient) Authenticate() error {
 		return fmt.Errorf("authentication failed: %s", strings.TrimSpace(response))
 	}
 
-	fmt.Println("Authentication successful")
+	slog.Debug("Authentication successful")
 	return nil
 }
 
@@ -183,7 +187,10 @@ func (r *RedisClient) SendPSYNC() (*ReplicationInfo, error) {
 		return nil, fmt.Errorf("invalid offset in FULLRESYNC: %v", err)
 	}
 
-	fmt.Printf("Received FULLRESYNC: ID=%s, Offset=%d\n", replID, offset)
+	slog.Info("Received FULLRESYNC response",
+		"replication_id", replID,
+		"offset", offset,
+	)
 	return &ReplicationInfo{ID: replID, Offset: offset}, nil
 }
 
@@ -213,7 +220,7 @@ func (r *RedisClient) ReadRDBSnapshot() ([]byte, error) {
 		return nil, fmt.Errorf("invalid RDB length: %v", err)
 	}
 
-	fmt.Printf("Reading RDB snapshot (%d bytes)...\n", length)
+	slog.Info("Reading RDB snapshot", "size_bytes", length)
 
 	// Read RDB data
 	data := make([]byte, length)
@@ -221,7 +228,7 @@ func (r *RedisClient) ReadRDBSnapshot() ([]byte, error) {
 		return nil, fmt.Errorf("failed to read RDB data: %v", err)
 	}
 
-	fmt.Printf("RDB snapshot read successfully (%d bytes)\n", length)
+	slog.Info("RDB snapshot read successfully", "size_bytes", length)
 	return data, nil
 }
 
@@ -369,7 +376,7 @@ func (r *RedisClient) Close() error {
 		err := r.conn.Close()
 		r.conn = nil
 		r.reader = nil
-		fmt.Println("Redis connection closed")
+		slog.Debug("Redis connection closed")
 		return err
 	}
 	return nil

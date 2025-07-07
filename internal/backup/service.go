@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"strconv"
@@ -16,6 +17,7 @@ type BackupService struct {
 	s3Enabled   bool
 	redisClient *RedisClient
 	s3Uploader  *S3Uploader
+	logger      *slog.Logger
 
 	// Replication state
 	replID     string
@@ -28,16 +30,26 @@ type ReplicationInfo struct {
 }
 
 func Run() {
+	// Initialize structured logger
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
+	slog.SetDefault(logger)
+
 	// Initialize the backup service
-	backupService := &BackupService{}
+	backupService := &BackupService{
+		logger: logger,
+	}
 
 	if err := backupService.initialize(); err != nil {
-		panic(fmt.Errorf("failed to initialize backup service: %v", err))
+		logger.Error("Failed to initialize backup service", "error", err)
+		os.Exit(1)
 	}
 
 	// Start the backup process
 	if err := backupService.Start(context.Background()); err != nil {
-		panic(fmt.Errorf("backup service failed: %v", err))
+		logger.Error("Backup service failed", "error", err)
+		os.Exit(1)
 	}
 }
 
@@ -83,8 +95,13 @@ func (s *BackupService) initialize() error {
 	}
 	s.s3Uploader = uploader
 
-	fmt.Printf("Backup service initialized - Redis: %s:%s, TLS: %v, S3: %v\n",
-		redisHost, redisPort, tlsEnabled, s.s3Enabled)
+	s.logger.Info("Backup service initialized",
+		"redis_host", redisHost,
+		"redis_port", redisPort,
+		"tls_enabled", tlsEnabled,
+		"s3_enabled", s.s3Enabled,
+		"s3_bucket", s.s3Bucket,
+	)
 	return nil
 }
 
@@ -92,20 +109,20 @@ func (s *BackupService) Start(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Println("Backup service shutting down...")
+			s.logger.Info("Backup service shutting down")
 			return ctx.Err()
 		default:
-			fmt.Println("Starting backup service as Redis replica...")
+			s.logger.Info("Starting backup service as Redis replica")
 
 			if err := s.runAsReplica(ctx); err != nil {
-				fmt.Printf("Replica connection failed: %v\n", err)
+				s.logger.Error("Replica connection failed", "error", err)
 
 				// Try graceful reconnect
 				if reconnectErr := s.gracefulReconnect(); reconnectErr != nil {
-					fmt.Printf("Graceful reconnect failed: %v\n", reconnectErr)
+					s.logger.Error("Graceful reconnect failed", "error", reconnectErr)
 				}
 
-				fmt.Println("Retrying replica connection in 30 seconds...")
+				s.logger.Info("Retrying replica connection", "retry_delay", "30s")
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
@@ -114,7 +131,7 @@ func (s *BackupService) Start(ctx context.Context) error {
 				}
 			}
 
-			fmt.Println("Replica connection ended, attempting to reconnect...")
+			s.logger.Info("Replica connection ended, attempting to reconnect")
 			time.Sleep(5 * time.Second)
 		}
 	}
@@ -141,7 +158,10 @@ func (s *BackupService) runAsReplica(ctx context.Context) error {
 
 	s.replID = replInfo.ID
 	s.replOffset = replInfo.Offset
-	fmt.Printf("Acting as Redis replica - ID: %s, Offset: %d\n", s.replID, s.replOffset)
+	s.logger.Info("Acting as Redis replica",
+		"replication_id", s.replID,
+		"replication_offset", s.replOffset,
+	)
 
 	// Step 4: Stream RDB snapshot directly to S3
 	if err := s.streamRDBToS3(); err != nil {
@@ -157,7 +177,7 @@ func (s *BackupService) runAsReplica(ctx context.Context) error {
 }
 
 func (s *BackupService) streamRDBToS3() error {
-	fmt.Println("Streaming RDB snapshot directly to S3...")
+	s.logger.Info("Streaming RDB snapshot directly to S3")
 
 	// Read RDB data from Redis
 	rdbData, err := s.redisClient.ReadRDBSnapshot()
@@ -187,7 +207,7 @@ func (s *BackupService) streamRDBToS3() error {
 
 	location, err := s.s3Uploader.UploadStreamWithProgress(ctx, reader, s3Key, metadata, func(bytes int64) {
 		if bytes%(1024*1024) == 0 { // Log every MB
-			fmt.Printf("Uploaded RDB: %d bytes\n", bytes)
+			s.logger.Debug("RDB upload progress", "bytes_uploaded", bytes)
 		}
 	})
 
@@ -195,12 +215,16 @@ func (s *BackupService) streamRDBToS3() error {
 		return fmt.Errorf("failed to upload RDB to S3: %v", err)
 	}
 
-	fmt.Printf("RDB snapshot successfully uploaded to S3: %s (%d bytes)\n", location, len(rdbData))
+	s.logger.Info("RDB snapshot successfully uploaded to S3",
+		"location", location,
+		"size_bytes", len(rdbData),
+		"s3_key", s3Key,
+	)
 	return nil
 }
 
 func (s *BackupService) streamCommandsToS3(ctx context.Context) error {
-	fmt.Println("Starting persistent command stream backup to S3...")
+	s.logger.Info("Starting persistent command stream backup to S3")
 
 	// Create a pipe for streaming commands
 	reader, writer := io.Pipe()
@@ -236,13 +260,15 @@ func (s *BackupService) streamReplicationData(ctx context.Context, writer *io.Pi
 	keepaliveInterval := 30 * time.Second // More frequent keepalive
 	lastKeepalive := time.Now()
 
-	fmt.Println("Acting as Redis replica - continuously waiting for commands...")
-	fmt.Println("This will run until the Redis master disconnects or context is cancelled")
+	s.logger.Info("Acting as Redis replica - continuously waiting for commands",
+		"command_timeout", commandTimeout,
+		"keepalive_interval", keepaliveInterval,
+	)
 
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Println("Context cancelled, stopping replica...")
+			s.logger.Info("Context cancelled, stopping replica")
 			writer.CloseWithError(ctx.Err())
 			return ctx.Err()
 		case err := <-uploadComplete:
@@ -263,7 +289,7 @@ func (s *BackupService) streamReplicationData(ctx context.Context, writer *io.Pi
 
 			commandCount++
 			if commandCount%10 == 0 {
-				fmt.Printf("Replicated %d commands...\n", commandCount)
+				s.logger.Debug("Replication progress", "commands_replicated", commandCount)
 			}
 		}
 	}
@@ -272,24 +298,24 @@ func (s *BackupService) streamReplicationData(ctx context.Context, writer *io.Pi
 // handleUploadComplete handles the completion of S3 upload
 func (s *BackupService) handleUploadComplete(err error) error {
 	if err != nil {
-		fmt.Printf("Upload failed: %v\n", err)
+		s.logger.Error("S3 upload failed", "error", err)
 		return err
 	}
-	fmt.Println("Upload completed successfully")
+	s.logger.Info("S3 upload completed successfully")
 	return nil
 }
 
 // shouldSendKeepalive checks if keepalive should be sent
 func (s *BackupService) shouldSendKeepalive(lastKeepalive time.Time, interval time.Duration) bool {
 	if time.Since(lastKeepalive) > interval {
-		fmt.Println("Sending replication keepalive (REPLCONF ACK)...")
+		s.logger.Debug("Sending replication keepalive (REPLCONF ACK)")
 
 		// Send REPLCONF ACK to maintain replication connection
 		// This is the proper way to keepalive a replication connection
 		if err := s.sendReplconfAck(); err != nil {
-			fmt.Printf("Warning: Failed to send REPLCONF ACK: %v\n", err)
+			s.logger.Warn("Failed to send REPLCONF ACK", "error", err)
 		} else {
-			fmt.Println("REPLCONF ACK sent successfully")
+			s.logger.Debug("REPLCONF ACK sent successfully")
 		}
 
 		return true
@@ -324,24 +350,27 @@ func (s *BackupService) handleReplicationError(err error, writer *io.PipeWriter)
 	}
 
 	if err == io.EOF {
-		fmt.Println("Master closed replication connection (EOF)")
-		fmt.Println("This can happen due to:")
-		fmt.Println("  - Redis master timeout for idle connections")
-		fmt.Println("  - Network timeout/firewall rules")
-		fmt.Println("  - Redis restart or configuration changes")
-		fmt.Println("  - Maximum replica connections reached")
+		s.logger.Warn("Master closed replication connection (EOF)")
+		s.logger.Info("Common causes for connection closure:",
+			"reasons", []string{
+				"Redis master timeout for idle connections",
+				"Network timeout/firewall rules",
+				"Redis restart or configuration changes",
+				"Maximum replica connections reached",
+			},
+		)
 		return nil
 	}
 
 	// Check for specific network errors
 	if netErr, ok := err.(net.Error); ok {
 		if netErr.Timeout() {
-			fmt.Printf("Network timeout during replication: %v\n", err)
+			s.logger.Warn("Network timeout during replication", "error", err)
 		} else {
-			fmt.Printf("Network error during replication: %v\n", err)
+			s.logger.Error("Network error during replication", "error", err)
 		}
 	} else {
-		fmt.Printf("Replication error: %v\n", err)
+		s.logger.Error("Replication error", "error", err)
 	}
 
 	writer.CloseWithError(err)
@@ -355,7 +384,7 @@ func (s *BackupService) writeCommandToStream(writer *io.PipeWriter, command stri
 	}
 
 	if _, err := writer.Write([]byte(command)); err != nil {
-		fmt.Printf("Failed to write command to backup stream: %v\n", err)
+		s.logger.Error("Failed to write command to backup stream", "error", err)
 		return err
 	}
 	return nil
@@ -363,7 +392,7 @@ func (s *BackupService) writeCommandToStream(writer *io.PipeWriter, command stri
 
 // gracefulReconnect handles reconnection and restart of backup cycle
 func (s *BackupService) gracefulReconnect() error {
-	fmt.Println("Attempting graceful reconnect...")
+	s.logger.Info("Attempting graceful reconnect")
 
 	// Close existing connection
 	s.redisClient.Close()
@@ -382,7 +411,7 @@ func (s *BackupService) gracefulReconnect() error {
 		return fmt.Errorf("authentication failed after reconnect: %v", err)
 	}
 
-	fmt.Println("Successfully reconnected to Redis")
+	s.logger.Info("Successfully reconnected to Redis")
 	s.redisClient.Close() // Close for now, will reconnect in next cycle
 	return nil
 }
@@ -412,7 +441,7 @@ func (s *BackupService) uploadStreamToS3(reader io.Reader, s3Key string, metadat
 
 	location, err := s.s3Uploader.UploadStreamWithProgress(ctx, reader, s3Key, metadata, func(bytes int64) {
 		if bytes%(1024*1024) == 0 { // Log every MB
-			fmt.Printf("Uploaded AOF: %d bytes\n", bytes)
+			s.logger.Debug("AOF upload progress", "bytes_uploaded", bytes)
 		}
 	})
 
@@ -421,6 +450,9 @@ func (s *BackupService) uploadStreamToS3(reader io.Reader, s3Key string, metadat
 		return
 	}
 
-	fmt.Printf("AOF stream successfully uploaded to S3: %s\n", location)
+	s.logger.Info("AOF stream successfully uploaded to S3",
+		"location", location,
+		"s3_key", s3Key,
+	)
 	uploadComplete <- nil
 }

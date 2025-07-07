@@ -2,6 +2,8 @@ package backup
 
 import (
 	"context"
+	"log/slog"
+	"os"
 	"testing"
 	"time"
 
@@ -20,7 +22,14 @@ func TestStreamingBackupInitialization(t *testing.T) {
 	t.Setenv("REDIS_HOST", "localhost")
 	t.Setenv("REDIS_PORT", "6379")
 
-	service := &BackupService{}
+	// Initialize logger for testing
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelError, // Reduce noise in tests
+	}))
+
+	service := &BackupService{
+		logger: logger,
+	}
 	err := service.initialize()
 
 	// Should succeed with proper S3 configuration
@@ -38,7 +47,14 @@ func TestStreamingBackupWithoutS3(t *testing.T) {
 	t.Setenv("REDIS_HOST", "localhost")
 	t.Setenv("REDIS_PORT", "6379")
 
-	service := &BackupService{}
+	// Initialize logger for testing
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelError, // Reduce noise in tests
+	}))
+
+	service := &BackupService{
+		logger: logger,
+	}
 	err := service.initialize()
 
 	// Should fail because S3 is now required
