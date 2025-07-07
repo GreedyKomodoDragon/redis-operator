@@ -11,6 +11,11 @@ import (
 	"time"
 )
 
+// Constants for error messages
+const (
+	ErrNotConnected = "not connected to Redis"
+)
+
 // RedisClient handles Redis connections and protocol operations
 type RedisClient struct {
 	host       string
@@ -51,21 +56,24 @@ func (r *RedisClient) Connect() error {
 	addr := net.JoinHostPort(r.host, r.port)
 	fmt.Printf("Connecting to Redis at %s...\n", addr)
 
+	conn, err := r.establishConnection(addr)
+	if err != nil {
+		return err
+	}
+
+	r.configureConnection(conn)
+	fmt.Println("Connected to Redis successfully")
+	return nil
+}
+
+// establishConnection handles the connection retry logic
+func (r *RedisClient) establishConnection(addr string) (net.Conn, error) {
 	var conn net.Conn
 	var err error
 
-	// Retry connection with exponential backoff
 	retryDelay := r.retryDelay
 	for attempt := 0; attempt < r.maxRetries; attempt++ {
-		if r.tlsEnabled {
-			tlsConfig := &tls.Config{
-				ServerName: r.host,
-			}
-			conn, err = tls.Dial("tcp", addr, tlsConfig)
-		} else {
-			conn, err = net.Dial("tcp", addr)
-		}
-
+		conn, err = r.dialConnection(addr)
 		if err == nil {
 			break
 		}
@@ -75,7 +83,6 @@ func (r *RedisClient) Connect() error {
 				attempt+1, err, retryDelay)
 			time.Sleep(retryDelay)
 
-			// Exponential backoff with max limit
 			retryDelay *= 2
 			if retryDelay > r.maxRetryDelay {
 				retryDelay = r.maxRetryDelay
@@ -84,13 +91,40 @@ func (r *RedisClient) Connect() error {
 	}
 
 	if err != nil {
-		return fmt.Errorf("connection failed after %d attempts: %v", r.maxRetries, err)
+		return nil, fmt.Errorf("connection failed after %d attempts: %v", r.maxRetries, err)
+	}
+
+	return conn, nil
+}
+
+// dialConnection handles the actual connection establishment
+func (r *RedisClient) dialConnection(addr string) (net.Conn, error) {
+	if r.tlsEnabled {
+		tlsConfig := &tls.Config{
+			ServerName: r.host,
+		}
+		return tls.Dial("tcp", addr, tlsConfig)
+	}
+	return net.Dial("tcp", addr)
+}
+
+// configureConnection sets up the connection with keepalive and buffers
+func (r *RedisClient) configureConnection(conn net.Conn) {
+	// Configure TCP keepalive for replication connections
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		if err := tcpConn.SetKeepAlive(true); err != nil {
+			fmt.Printf("Warning: Failed to enable TCP keepalive: %v\n", err)
+		} else {
+			if err := tcpConn.SetKeepAlivePeriod(60 * time.Second); err != nil {
+				fmt.Printf("Warning: Failed to set TCP keepalive period: %v\n", err)
+			} else {
+				fmt.Println("TCP keepalive enabled for replication connection")
+			}
+		}
 	}
 
 	r.conn = conn
 	r.reader = bufio.NewReader(conn)
-	fmt.Println("Connected to Redis successfully")
-	return nil
 }
 
 // Authenticate performs Redis AUTH command if password is provided
@@ -272,7 +306,7 @@ func (r *RedisClient) readRESPBulkString() (string, error) {
 // SendKeepAlive sends a PING command to keep the connection alive
 func (r *RedisClient) SendKeepAlive() error {
 	if r.conn == nil {
-		return fmt.Errorf("not connected to Redis")
+		return fmt.Errorf(ErrNotConnected)
 	}
 
 	// Send PING command
@@ -302,7 +336,7 @@ func (r *RedisClient) IsConnected() bool {
 // ReadRESPCommandWithTimeout reads a RESP command with a timeout
 func (r *RedisClient) ReadRESPCommandWithTimeout(timeout time.Duration) (string, error) {
 	if r.conn == nil {
-		return "", fmt.Errorf("not connected to Redis")
+		return "", fmt.Errorf(ErrNotConnected)
 	}
 
 	// Set read deadline
@@ -314,6 +348,19 @@ func (r *RedisClient) ReadRESPCommandWithTimeout(timeout time.Duration) (string,
 	defer r.conn.SetReadDeadline(time.Time{})
 
 	return r.ReadRESPCommand()
+}
+
+// SendCommand sends a raw command to Redis
+func (r *RedisClient) SendCommand(command string) error {
+	if r.conn == nil {
+		return fmt.Errorf(ErrNotConnected)
+	}
+
+	if _, err := r.conn.Write([]byte(command)); err != nil {
+		return fmt.Errorf("failed to send command: %v", err)
+	}
+
+	return nil
 }
 
 // Close closes the Redis connection

@@ -89,48 +89,39 @@ func (s *BackupService) initialize() error {
 }
 
 func (s *BackupService) Start(ctx context.Context) error {
-	backupCount := 0
-
 	for {
 		select {
 		case <-ctx.Done():
 			fmt.Println("Backup service shutting down...")
 			return ctx.Err()
 		default:
-			backupCount++
-			fmt.Printf("Starting backup cycle #%d\n", backupCount)
+			fmt.Println("Starting backup service as Redis replica...")
 
-			if err := s.performBackupCycle(); err != nil {
-				fmt.Printf("Backup cycle #%d failed: %v\n", backupCount, err)
+			if err := s.runAsReplica(ctx); err != nil {
+				fmt.Printf("Replica connection failed: %v\n", err)
 
 				// Try graceful reconnect
 				if reconnectErr := s.gracefulReconnect(); reconnectErr != nil {
 					fmt.Printf("Graceful reconnect failed: %v\n", reconnectErr)
 				}
 
-				fmt.Println("Retrying in 30 seconds...")
-				time.Sleep(30 * time.Second)
-				continue
+				fmt.Println("Retrying replica connection in 30 seconds...")
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(30 * time.Second):
+					continue
+				}
 			}
 
-			fmt.Printf("Backup cycle #%d completed successfully\n", backupCount)
-
-			// For continuous backup, wait before next cycle
-			// In production, this might be controlled by a schedule
-			fmt.Println("Waiting 5 minutes before next backup cycle...")
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(5 * time.Minute):
-				// Continue to next backup cycle
-			}
+			fmt.Println("Replica connection ended, attempting to reconnect...")
+			time.Sleep(5 * time.Second)
 		}
 	}
 }
 
-func (s *BackupService) performBackupCycle() error {
-	fmt.Println("Starting backup cycle...")
-
+// runAsReplica establishes a persistent connection to Redis and acts as a replica
+func (s *BackupService) runAsReplica(ctx context.Context) error {
 	// Step 1: Connect to Redis
 	if err := s.redisClient.Connect(); err != nil {
 		return fmt.Errorf("failed to connect to Redis: %v", err)
@@ -150,15 +141,15 @@ func (s *BackupService) performBackupCycle() error {
 
 	s.replID = replInfo.ID
 	s.replOffset = replInfo.Offset
-	fmt.Printf("Starting full resync - ID: %s, Offset: %d\n", s.replID, s.replOffset)
+	fmt.Printf("Acting as Redis replica - ID: %s, Offset: %d\n", s.replID, s.replOffset)
 
 	// Step 4: Stream RDB snapshot directly to S3
 	if err := s.streamRDBToS3(); err != nil {
 		return fmt.Errorf("failed to stream RDB to S3: %v", err)
 	}
 
-	// Step 5: Stream command stream directly to S3
-	if err := s.streamCommandsToS3(); err != nil {
+	// Step 5: Continuously stream commands as they arrive (act as persistent replica)
+	if err := s.streamCommandsToS3(ctx); err != nil {
 		return fmt.Errorf("failed to stream commands to S3: %v", err)
 	}
 
@@ -208,8 +199,8 @@ func (s *BackupService) streamRDBToS3() error {
 	return nil
 }
 
-func (s *BackupService) streamCommandsToS3() error {
-	fmt.Println("Starting command stream backup to S3...")
+func (s *BackupService) streamCommandsToS3(ctx context.Context) error {
+	fmt.Println("Starting persistent command stream backup to S3...")
 
 	// Create a pipe for streaming commands
 	reader, writer := io.Pipe()
@@ -231,75 +222,142 @@ func (s *BackupService) streamCommandsToS3() error {
 	uploadComplete := make(chan error, 1)
 	go s.uploadStreamToS3(reader, s3Key, metadata, uploadComplete)
 
-	// Stream commands to the pipe with timeout and keepalive handling
-	commandCount := 0
+	// Stream commands to the pipe - act as a persistent replica
 	defer writer.Close()
 
-	// Use a shorter timeout to check for commands frequently
-	commandTimeout := 30 * time.Second
-	maxStreamDuration := 10 * time.Minute
-	keepaliveInterval := 60 * time.Second
+	return s.streamReplicationData(ctx, writer, uploadComplete)
+}
 
-	streamStart := time.Now()
+// streamReplicationData handles the actual streaming of replication data
+func (s *BackupService) streamReplicationData(ctx context.Context, writer *io.PipeWriter, uploadComplete <-chan error) error {
+	commandCount := 0
+	// Use longer timeout for replication connections - Redis replicas can be idle for long periods
+	commandTimeout := 5 * time.Minute     // Increased from 30 seconds
+	keepaliveInterval := 30 * time.Second // More frequent keepalive
 	lastKeepalive := time.Now()
 
+	fmt.Println("Acting as Redis replica - continuously waiting for commands...")
+	fmt.Println("This will run until the Redis master disconnects or context is cancelled")
+
 	for {
-		// Check if we've exceeded the maximum stream duration
-		if time.Since(streamStart) > maxStreamDuration {
-			fmt.Printf("Maximum stream duration (%v) reached - completing backup\n", maxStreamDuration)
-			break
-		}
-
-		// Send keepalive if needed
-		if time.Since(lastKeepalive) > keepaliveInterval {
-			if err := s.redisClient.SendKeepAlive(); err != nil {
-				fmt.Printf("Keepalive failed: %v - ending stream\n", err)
-				break
-			}
-			lastKeepalive = time.Now()
-			fmt.Println("Sent keepalive to maintain Redis connection")
-		}
-
-		// Try to read a command with timeout
-		command, err := s.redisClient.ReadRESPCommandWithTimeout(commandTimeout)
-		if err != nil {
-			// Check if it's a timeout (which is expected with low traffic)
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				// Timeout is expected with low traffic - continue waiting
-				fmt.Printf("No commands received in %v - continuing to wait...\n", commandTimeout)
-				continue
+		select {
+		case <-ctx.Done():
+			fmt.Println("Context cancelled, stopping replica...")
+			writer.CloseWithError(ctx.Err())
+			return ctx.Err()
+		case err := <-uploadComplete:
+			return s.handleUploadComplete(err)
+		default:
+			if s.shouldSendKeepalive(lastKeepalive, keepaliveInterval) {
+				lastKeepalive = time.Now()
 			}
 
-			// Check for connection closed
-			if err == io.EOF {
-				fmt.Println("Redis connection closed - attempting to complete backup gracefully")
-				break
+			command, err := s.readReplicationCommand(commandTimeout)
+			if err != nil {
+				return s.handleReplicationError(err, writer)
 			}
 
-			// Other errors
-			fmt.Printf("Error reading command: %v - ending stream\n", err)
-			writer.CloseWithError(fmt.Errorf("failed to read command: %v", err))
-			break
-		}
+			if err := s.writeCommandToStream(writer, command); err != nil {
+				return err
+			}
 
-		// Successfully read a command - write it to the pipe
-		if _, err := writer.Write([]byte(command)); err != nil {
-			writer.CloseWithError(fmt.Errorf("failed to write command: %v", err))
-			break
-		}
-
-		commandCount++
-		if commandCount%100 == 0 {
-			fmt.Printf("Streamed %d commands...\n", commandCount)
+			commandCount++
+			if commandCount%10 == 0 {
+				fmt.Printf("Replicated %d commands...\n", commandCount)
+			}
 		}
 	}
+}
 
-	// Wait for upload to complete
-	if err := <-uploadComplete; err != nil {
+// handleUploadComplete handles the completion of S3 upload
+func (s *BackupService) handleUploadComplete(err error) error {
+	if err != nil {
+		fmt.Printf("Upload failed: %v\n", err)
 		return err
 	}
+	fmt.Println("Upload completed successfully")
+	return nil
+}
 
-	fmt.Printf("Command stream ended. Total commands processed: %d\n", commandCount)
+// shouldSendKeepalive checks if keepalive should be sent
+func (s *BackupService) shouldSendKeepalive(lastKeepalive time.Time, interval time.Duration) bool {
+	if time.Since(lastKeepalive) > interval {
+		fmt.Println("Sending replication keepalive (REPLCONF ACK)...")
+
+		// Send REPLCONF ACK to maintain replication connection
+		// This is the proper way to keepalive a replication connection
+		if err := s.sendReplconfAck(); err != nil {
+			fmt.Printf("Warning: Failed to send REPLCONF ACK: %v\n", err)
+		} else {
+			fmt.Println("REPLCONF ACK sent successfully")
+		}
+
+		return true
+	}
+	return false
+}
+
+// sendReplconfAck sends a REPLCONF ACK command to maintain replication connection
+func (s *BackupService) sendReplconfAck() error {
+	// Send REPLCONF ACK with current offset
+	replconfCmd := fmt.Sprintf("REPLCONF ACK %d\r\n", s.replOffset)
+	return s.redisClient.SendCommand(replconfCmd)
+}
+
+// readReplicationCommand reads a command from the replication stream
+func (s *BackupService) readReplicationCommand(timeout time.Duration) (string, error) {
+	command, err := s.redisClient.ReadRESPCommandWithTimeout(timeout)
+	if err != nil {
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			// Timeout is normal for replicas with low traffic
+			return "", nil
+		}
+		return "", err
+	}
+	return command, nil
+}
+
+// handleReplicationError handles errors during replication
+func (s *BackupService) handleReplicationError(err error, writer *io.PipeWriter) error {
+	if err == nil {
+		return nil // No error, continue
+	}
+
+	if err == io.EOF {
+		fmt.Println("Master closed replication connection (EOF)")
+		fmt.Println("This can happen due to:")
+		fmt.Println("  - Redis master timeout for idle connections")
+		fmt.Println("  - Network timeout/firewall rules")
+		fmt.Println("  - Redis restart or configuration changes")
+		fmt.Println("  - Maximum replica connections reached")
+		return nil
+	}
+
+	// Check for specific network errors
+	if netErr, ok := err.(net.Error); ok {
+		if netErr.Timeout() {
+			fmt.Printf("Network timeout during replication: %v\n", err)
+		} else {
+			fmt.Printf("Network error during replication: %v\n", err)
+		}
+	} else {
+		fmt.Printf("Replication error: %v\n", err)
+	}
+
+	writer.CloseWithError(err)
+	return err
+}
+
+// writeCommandToStream writes a command to the backup stream
+func (s *BackupService) writeCommandToStream(writer *io.PipeWriter, command string) error {
+	if command == "" {
+		return nil // Skip empty commands (timeouts)
+	}
+
+	if _, err := writer.Write([]byte(command)); err != nil {
+		fmt.Printf("Failed to write command to backup stream: %v\n", err)
+		return err
+	}
 	return nil
 }
 
