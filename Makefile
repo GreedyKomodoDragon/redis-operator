@@ -53,6 +53,8 @@ OPERATOR_SDK_VERSION ?= v1.40.0
 IMG ?= greedykomodo/redis-operator:v$(VERSION)
 # Backup image URL
 BACKUP_IMG ?= greedykomodo/redis-backup:v$(VERSION)
+# Backup init image URL
+BACKUP_INIT_IMG ?= greedykomodo/redis-backup-init:v$(VERSION)
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -208,6 +210,10 @@ docker-build: ## Build docker image with the manager.
 docker-build-backup: ## Build docker image with the backup service.
 	$(CONTAINER_TOOL) build -f Dockerfile.backup -t ${BACKUP_IMG} .
 
+.PHONY: docker-build-backup-init
+docker-build-backup-init: ## Build docker image with the backup init service.
+	$(CONTAINER_TOOL) build -f Dockerfile.backup-init -t ${BACKUP_INIT_IMG} .
+
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
@@ -215,6 +221,10 @@ docker-push: ## Push docker image with the manager.
 .PHONY: docker-push-backup
 docker-push-backup: ## Push docker image with the backup service.
 	$(CONTAINER_TOOL) push ${BACKUP_IMG}
+
+.PHONY: docker-push-backup-init
+docker-push-backup-init: ## Push docker image with the backup init service.
+	$(CONTAINER_TOOL) push ${BACKUP_INIT_IMG}
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
@@ -315,6 +325,82 @@ minikube-load-backup-no-cache: ## Build backup docker image without cache and lo
 	@echo "Successfully loaded $(BACKUP_IMG) into minikube!"
 	@echo "Verifying backup image is loaded:"
 	@minikube image ls | grep $(shell echo $(BACKUP_IMG) | cut -d: -f1) || echo "Warning: Backup image verification failed"
+
+.PHONY: minikube-load-backup-init
+minikube-load-backup-init: docker-build-backup-init ## Build backup init docker image and load it into minikube, replacing any existing image with the same tag.
+	@echo "Building and loading $(BACKUP_INIT_IMG) into minikube..."
+	@echo "Removing existing backup-init image from minikube if it exists..."
+	@minikube image rm $(BACKUP_INIT_IMG) 2>/dev/null || true
+	@echo "Saving backup-init docker image to tar file..."
+	@$(CONTAINER_TOOL) image save -o backup-init-image.tar $(BACKUP_INIT_IMG)
+	@echo "Loading backup-init image into minikube..."
+	@minikube image load backup-init-image.tar
+	@echo "Cleaning up tar file..."
+	@rm -f backup-init-image.tar
+	@echo "Successfully loaded $(BACKUP_INIT_IMG) into minikube!"
+	@echo "Verifying backup-init image is loaded:"
+	@minikube image ls | grep $(shell echo $(BACKUP_INIT_IMG) | cut -d: -f1) || echo "Warning: Backup-init image verification failed"
+
+.PHONY: minikube-load-backup-init-no-cache
+minikube-load-backup-init-no-cache: ## Build backup init docker image without cache and load it into minikube, replacing any existing image.
+	@echo "Building $(BACKUP_INIT_IMG) without cache and loading into minikube..."
+	@echo "Removing existing backup-init image from minikube if it exists..."
+	@minikube image rm $(BACKUP_INIT_IMG) 2>/dev/null || true
+	@echo "Building backup-init docker image without cache..."
+	@$(CONTAINER_TOOL) build --no-cache -f Dockerfile.backup-init -t $(BACKUP_INIT_IMG) .
+	@echo "Saving backup-init docker image to tar file..."
+	@$(CONTAINER_TOOL) image save -o backup-init-image.tar $(BACKUP_INIT_IMG)
+	@echo "Loading backup-init image into minikube..."
+	@minikube image load backup-init-image.tar
+	@echo "Cleaning up tar file..."
+	@rm -f backup-init-image.tar
+	@echo "Successfully loaded $(BACKUP_INIT_IMG) into minikube!"
+	@echo "Verifying backup-init image is loaded:"
+	@minikube image ls | grep $(shell echo $(BACKUP_INIT_IMG) | cut -d: -f1) || echo "Warning: Backup-init image verification failed"
+
+.PHONY: minikube-load-all
+minikube-load-all: ## Build and load all images (operator, backup, backup-init) into minikube.
+	@echo "Building and loading all images into minikube..."
+	@echo "=============================================="
+	@echo "1/3 Building and loading operator image..."
+	@$(MAKE) minikube-load
+	@echo ""
+	@echo "2/3 Building and loading backup image..."
+	@$(MAKE) minikube-load-backup
+	@echo ""
+	@echo "3/3 Building and loading backup-init image..."
+	@$(MAKE) minikube-load-backup-init
+	@echo ""
+	@echo "=============================================="
+	@echo "✅ All images successfully loaded into minikube!"
+	@echo "   • Operator: $(IMG)"
+	@echo "   • Backup: $(BACKUP_IMG)"
+	@echo "   • Backup Init: $(BACKUP_INIT_IMG)"
+	@echo ""
+	@echo "Verifying all images are loaded:"
+	@minikube image ls | grep -E "($(shell echo $(IMG) | cut -d: -f1)|$(shell echo $(BACKUP_IMG) | cut -d: -f1)|$(shell echo $(BACKUP_INIT_IMG) | cut -d: -f1))" || echo "Warning: Some images may not be visible in verification"
+
+.PHONY: minikube-load-all-no-cache
+minikube-load-all-no-cache: ## Build all images without cache and load them into minikube.
+	@echo "Building all images without cache and loading into minikube..."
+	@echo "=========================================================="
+	@echo "1/3 Building and loading operator image (no cache)..."
+	@$(MAKE) minikube-load-no-cache
+	@echo ""
+	@echo "2/3 Building and loading backup image (no cache)..."
+	@$(MAKE) minikube-load-backup-no-cache
+	@echo ""
+	@echo "3/3 Building and loading backup-init image (no cache)..."
+	@$(MAKE) minikube-load-backup-init-no-cache
+	@echo ""
+	@echo "=========================================================="
+	@echo "✅ All images successfully built (no cache) and loaded into minikube!"
+	@echo "   • Operator: $(IMG)"
+	@echo "   • Backup: $(BACKUP_IMG)"
+	@echo "   • Backup Init: $(BACKUP_INIT_IMG)"
+	@echo ""
+	@echo "Verifying all images are loaded:"
+	@minikube image ls | grep -E "($(shell echo $(IMG) | cut -d: -f1)|$(shell echo $(BACKUP_IMG) | cut -d: -f1)|$(shell echo $(BACKUP_INIT_IMG) | cut -d: -f1))" || echo "Warning: Some images may not be visible in verification"
 
 ##@ Deployment
 
