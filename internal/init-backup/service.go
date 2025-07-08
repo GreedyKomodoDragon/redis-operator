@@ -8,69 +8,77 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 type Service struct {
-	s3Client *s3.Client
-	bucket   string
-	logger   *slog.Logger
-}
-
-type S3Config struct {
-	Bucket          string
-	Region          string
-	Endpoint        string
-	AccessKeyID     string
-	SecretAccessKey string
+	objectStore ObjectStore
+	logger      *slog.Logger
 }
 
 type RDBFile struct {
-	Key          string
-	LastModified time.Time
-	Size         int64
+	Key           string
+	LastModified  time.Time
+	Size          int64
+	ReplicationID string
+	Timestamp     string
 }
 
-func NewService() *Service {
+type AOFFile struct {
+	Key           string
+	LastModified  time.Time
+	Size          int64
+	ReplicationID string
+	Timestamp     string
+}
+
+type BackupSet struct {
+	RDBFile  *RDBFile
+	AOFFiles []AOFFile
+}
+
+func NewService(objectStore ObjectStore) *Service {
 	// Initialize structured logger
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
 
 	return &Service{
-		logger: logger,
+		objectStore: objectStore,
+		logger:      logger,
 	}
 }
 
 func (s *Service) Run() error {
 	s.logger.Info("Starting init-backup service")
 
-	// Initialize S3 client
-	if err := s.initializeS3(); err != nil {
-		s.logger.Error("Failed to initialize S3 client", "error", err)
-		return err
-	}
-
-	// Fetch the latest RDB file
-	rdbFile, err := s.fetchLatestRDBFile()
+	// Fetch the latest backup set (RDB + matching AOF files)
+	backupSet, err := s.fetchLatestBackupSet()
 	if err != nil {
-		s.logger.Error("Failed to fetch latest RDB file", "error", err)
+		s.logger.Error("Failed to fetch latest backup set", "error", err)
 		return err
 	}
 
-	if rdbFile == nil {
-		s.logger.Info("No RDB files found in S3 bucket")
+	if backupSet == nil || backupSet.RDBFile == nil {
+		s.logger.Info("No backup sets found in object store")
 		return nil
 	}
 
-	s.logger.Info("Latest RDB file found",
-		"key", rdbFile.Key,
-		"size", rdbFile.Size,
-		"last_modified", rdbFile.LastModified,
+	s.logger.Info("Latest backup set found",
+		"rdb_key", backupSet.RDBFile.Key,
+		"rdb_size", backupSet.RDBFile.Size,
+		"rdb_timestamp", backupSet.RDBFile.Timestamp,
+		"aof_files_count", len(backupSet.AOFFiles),
 	)
+
+	// Log details about AOF files
+	for i, aofFile := range backupSet.AOFFiles {
+		s.logger.Info("AOF file found",
+			"index", i,
+			"key", aofFile.Key,
+			"size", aofFile.Size,
+			"timestamp", aofFile.Timestamp,
+		)
+	}
 
 	// For now, we only discover the latest RDB file
 	// Future implementation will download and restore the RDB file
@@ -78,125 +86,153 @@ func (s *Service) Run() error {
 	return nil
 }
 
-func (s *Service) initializeS3() error {
-	// Get S3 configuration from environment variables
-	s3Config := S3Config{
-		Bucket:          os.Getenv("S3_BUCKET"),
-		Region:          getEnvOrDefault("AWS_REGION", "us-east-1"),
-		Endpoint:        os.Getenv("AWS_ENDPOINT_URL"),
-		AccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
-		SecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
-	}
-
-	if s3Config.Bucket == "" {
-		return fmt.Errorf("S3_BUCKET environment variable is required")
-	}
-
-	s.bucket = s3Config.Bucket
-
-	// Create AWS config
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	var cfg aws.Config
-	var err error
-
-	if s3Config.Endpoint != "" {
-		// Custom endpoint (e.g., MinIO)
-		cfg, err = config.LoadDefaultConfig(ctx,
-			config.WithRegion(s3Config.Region),
-			config.WithCredentialsProvider(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
-				return aws.Credentials{
-					AccessKeyID:     s3Config.AccessKeyID,
-					SecretAccessKey: s3Config.SecretAccessKey,
-				}, nil
-			})),
-		)
-	} else {
-		// Standard AWS
-		cfg, err = config.LoadDefaultConfig(ctx,
-			config.WithRegion(s3Config.Region),
-		)
-	}
-
-	if err != nil {
-		return fmt.Errorf("failed to load AWS config: %v", err)
-	}
-
-	// Create S3 client
-	s3Options := func(o *s3.Options) {
-		if s3Config.Endpoint != "" {
-			o.BaseEndpoint = aws.String(s3Config.Endpoint)
-			o.UsePathStyle = true
-		}
-	}
-
-	s.s3Client = s3.NewFromConfig(cfg, s3Options)
-
-	s.logger.Info("S3 client initialized",
-		"bucket", s.bucket,
-		"region", s3Config.Region,
-		"custom_endpoint", s3Config.Endpoint != "",
-	)
-
-	return nil
-}
-
-func (s *Service) fetchLatestRDBFile() (*RDBFile, error) {
+func (s *Service) fetchLatestBackupSet() (*BackupSet, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	s.logger.Info("Searching for RDB files in S3 bucket", "bucket", s.bucket)
+	s.logger.Info("Searching for backup files in object store", "bucket", s.objectStore.GetBucketName())
 
-	// List objects in the bucket with redis-backups prefix
-	input := &s3.ListObjectsV2Input{
-		Bucket: aws.String(s.bucket),
-		Prefix: aws.String("redis-backups/"),
-	}
-
-	var rdbFiles []RDBFile
-
-	paginator := s3.NewListObjectsV2Paginator(s.s3Client, input)
-	for paginator.HasMorePages() {
-		page, err := paginator.NextPage(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to list S3 objects: %v", err)
-		}
-
-		for _, obj := range page.Contents {
-			if obj.Key != nil && strings.HasSuffix(*obj.Key, ".rdb") {
-				rdbFile := RDBFile{
-					Key:          *obj.Key,
-					LastModified: *obj.LastModified,
-					Size:         *obj.Size,
-				}
-				rdbFiles = append(rdbFiles, rdbFile)
-			}
-		}
+	rdbFiles, aofFiles, err := s.listBackupFiles(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	if len(rdbFiles) == 0 {
-		s.logger.Info("No RDB files found in S3 bucket")
+		s.logger.Info("No RDB files found in object store")
 		return nil, nil
 	}
 
-	// Sort by last modified time (newest first)
+	// Sort RDB files by last modified time (newest first)
 	sort.Slice(rdbFiles, func(i, j int) bool {
 		return rdbFiles[i].LastModified.After(rdbFiles[j].LastModified)
 	})
 
-	s.logger.Info("Found RDB files",
-		"count", len(rdbFiles),
-		"latest", rdbFiles[0].Key,
+	latestRDB := &rdbFiles[0]
+
+	s.logger.Info("Found backup files",
+		"rdb_count", len(rdbFiles),
+		"aof_count", len(aofFiles),
+		"latest_rdb", latestRDB.Key,
 	)
 
-	return &rdbFiles[0], nil
+	// Find AOF files that match the latest RDB's replication ID and timestamp
+	matchingAOFs := s.findMatchingAOFFiles(latestRDB, aofFiles)
+
+	return &BackupSet{
+		RDBFile:  latestRDB,
+		AOFFiles: matchingAOFs,
+	}, nil
 }
 
-// Helper function for environment variables
-func getEnvOrDefault(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
+func (s *Service) listBackupFiles(ctx context.Context) ([]RDBFile, []AOFFile, error) {
+	files, err := s.objectStore.ListFiles(ctx, "redis-backups/")
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to list files from object store: %v", err)
 	}
-	return defaultValue
+
+	var rdbFiles []RDBFile
+	var aofFiles []AOFFile
+
+	for _, file := range files {
+		if strings.HasSuffix(file.Key, ".rdb") {
+			rdbFile, err := s.parseRDBFile(file.Key, file.LastModified, file.Size)
+			if err != nil {
+				s.logger.Warn("Failed to parse RDB file", "key", file.Key, "error", err)
+				continue
+			}
+			rdbFiles = append(rdbFiles, *rdbFile)
+		} else if strings.HasSuffix(file.Key, ".aof") {
+			aofFile, err := s.parseAOFFile(file.Key, file.LastModified, file.Size)
+			if err != nil {
+				s.logger.Warn("Failed to parse AOF file", "key", file.Key, "error", err)
+				continue
+			}
+			aofFiles = append(aofFiles, *aofFile)
+		}
+	}
+
+	return rdbFiles, aofFiles, nil
+}
+
+func (s *Service) parseRDBFile(key string, lastModified time.Time, size int64) (*RDBFile, error) {
+	// Expected format: redis-backups/{replication_id}/dump-{timestamp}.rdb
+	parts := strings.Split(key, "/")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("invalid RDB file path format: %s", key)
+	}
+
+	replicationID := parts[1]
+	filename := parts[2]
+
+	// Extract timestamp from filename: dump-{timestamp}.rdb
+	if !strings.HasPrefix(filename, "dump-") || !strings.HasSuffix(filename, ".rdb") {
+		return nil, fmt.Errorf("invalid RDB filename format: %s", filename)
+	}
+
+	timestamp := strings.TrimPrefix(filename, "dump-")
+	timestamp = strings.TrimSuffix(timestamp, ".rdb")
+
+	return &RDBFile{
+		Key:           key,
+		LastModified:  lastModified,
+		Size:          size,
+		ReplicationID: replicationID,
+		Timestamp:     timestamp,
+	}, nil
+}
+
+func (s *Service) parseAOFFile(key string, lastModified time.Time, size int64) (*AOFFile, error) {
+	// Expected format: redis-backups/{replication_id}/appendonly-{timestamp}.aof
+	parts := strings.Split(key, "/")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("invalid AOF file path format: %s", key)
+	}
+
+	replicationID := parts[1]
+	filename := parts[2]
+
+	// Extract timestamp from filename: appendonly-{timestamp}.aof
+	if !strings.HasPrefix(filename, "appendonly-") || !strings.HasSuffix(filename, ".aof") {
+		return nil, fmt.Errorf("invalid AOF filename format: %s", filename)
+	}
+
+	timestamp := strings.TrimPrefix(filename, "appendonly-")
+	timestamp = strings.TrimSuffix(timestamp, ".aof")
+
+	return &AOFFile{
+		Key:           key,
+		LastModified:  lastModified,
+		Size:          size,
+		ReplicationID: replicationID,
+		Timestamp:     timestamp,
+	}, nil
+}
+
+func (s *Service) findMatchingAOFFiles(rdbFile *RDBFile, aofFiles []AOFFile) []AOFFile {
+	var matchingAOFs []AOFFile
+
+	for _, aofFile := range aofFiles {
+		// AOF files should have the same replication ID as the RDB file
+		if aofFile.ReplicationID == rdbFile.ReplicationID {
+			// For now, we'll include AOF files with timestamps close to the RDB timestamp
+			// In a more sophisticated implementation, we might check if the AOF timestamp
+			// is from the same backup session as the RDB
+			if aofFile.Timestamp == rdbFile.Timestamp {
+				matchingAOFs = append(matchingAOFs, aofFile)
+			}
+		}
+	}
+
+	// Sort AOF files by timestamp to maintain order
+	sort.Slice(matchingAOFs, func(i, j int) bool {
+		return matchingAOFs[i].Timestamp < matchingAOFs[j].Timestamp
+	})
+
+	s.logger.Debug("Found matching AOF files",
+		"rdb_replication_id", rdbFile.ReplicationID,
+		"rdb_timestamp", rdbFile.Timestamp,
+		"matching_aof_count", len(matchingAOFs),
+	)
+
+	return matchingAOFs
 }

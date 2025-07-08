@@ -1,52 +1,52 @@
 package initbackup
 
 import (
-	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
+const (
+	testTimestamp = "20241225-120000"
+	testReplID    = "abc123"
+	testAOFKey    = "redis-backups/abc123/appendonly-20241225-120000.aof"
+	testBucket    = "test-bucket"
+)
+
 func TestServiceInitialization(t *testing.T) {
-	service := NewService()
+	mockStore := NewMockObjectStore(testBucket)
+	service := NewService(mockStore)
 
 	// Service should initialize successfully
 	assert.NotNil(t, service)
 	assert.NotNil(t, service.logger)
+	assert.NotNil(t, service.objectStore)
 }
 
 func TestServiceRunWithoutS3Config(t *testing.T) {
-	// Clear any existing S3 environment variables
-	os.Unsetenv("S3_BUCKET")
-	os.Unsetenv("AWS_ACCESS_KEY_ID")
-	os.Unsetenv("AWS_SECRET_ACCESS_KEY")
+	// Test with mock store that returns an error
+	mockStore := NewMockObjectStore(testBucket)
+	mockStore.SetError(true, "connection failed")
 
-	service := NewService()
+	service := NewService(mockStore)
 	err := service.Run()
 
-	// Should fail without S3 configuration
+	// Should fail due to mock error
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "S3_BUCKET environment variable is required")
+	assert.Contains(t, err.Error(), "connection failed")
 }
 
 func TestServiceRunWithS3Config(t *testing.T) {
-	// Set up mock S3 configuration
-	t.Setenv("S3_BUCKET", "test-bucket")
-	t.Setenv("AWS_REGION", "us-east-1")
-	t.Setenv("AWS_ACCESS_KEY_ID", "test-key")
-	t.Setenv("AWS_SECRET_ACCESS_KEY", "test-secret")
+	// Test with mock store that works
+	mockStore := NewMockObjectStore(testBucket)
 
-	service := NewService()
-
-	// Note: This will fail because we don't have a real S3 bucket
-	// but we're testing that the service initializes correctly
+	service := NewService(mockStore)
 	err := service.Run()
 
-	// We expect some error (likely connection error), but not the config error
-	if err != nil {
-		assert.NotContains(t, err.Error(), "S3_BUCKET environment variable is required")
-	}
+	// Should succeed (no files found, but no error)
+	assert.NoError(t, err)
 }
 
 func TestGetEnvOrDefault(t *testing.T) {
@@ -58,4 +58,137 @@ func TestGetEnvOrDefault(t *testing.T) {
 	// Test with non-existing environment variable
 	result = getEnvOrDefault("NON_EXISTING_VAR", "default_value")
 	assert.Equal(t, "default_value", result)
+}
+
+func TestParseRDBFile(t *testing.T) {
+	mockStore := NewMockObjectStore(testBucket)
+	service := NewService(mockStore)
+	timestamp := time.Now()
+
+	tests := []struct {
+		name        string
+		key         string
+		shouldError bool
+		expectedID  string
+		expectedTS  string
+	}{
+		{
+			name:        "valid RDB file",
+			key:         "redis-backups/abc123/dump-" + testTimestamp + ".rdb",
+			shouldError: false,
+			expectedID:  testReplID,
+			expectedTS:  testTimestamp,
+		},
+		{
+			name:        "invalid path format",
+			key:         "invalid/path.rdb",
+			shouldError: true,
+		},
+		{
+			name:        "invalid filename format",
+			key:         "redis-backups/abc123/invalid.rdb",
+			shouldError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rdbFile, err := service.parseRDBFile(tt.key, timestamp, 1024)
+
+			if tt.shouldError {
+				assert.Error(t, err)
+				assert.Nil(t, rdbFile)
+			} else {
+				assert.NoError(t, err)
+				assert.NotNil(t, rdbFile)
+				assert.Equal(t, tt.expectedID, rdbFile.ReplicationID)
+				assert.Equal(t, tt.expectedTS, rdbFile.Timestamp)
+				assert.Equal(t, tt.key, rdbFile.Key)
+			}
+		})
+	}
+}
+
+func TestParseAOFFile(t *testing.T) {
+	mockStore := NewMockObjectStore(testBucket)
+	service := NewService(mockStore)
+	timestamp := time.Now()
+
+	tests := []struct {
+		name        string
+		key         string
+		shouldError bool
+		expectedID  string
+		expectedTS  string
+	}{
+		{
+			name:        "valid AOF file",
+			key:         testAOFKey,
+			shouldError: false,
+			expectedID:  testReplID,
+			expectedTS:  testTimestamp,
+		},
+		{
+			name:        "invalid path format",
+			key:         "invalid/path.aof",
+			shouldError: true,
+		},
+		{
+			name:        "invalid filename format",
+			key:         "redis-backups/abc123/invalid.aof",
+			shouldError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			aofFile, err := service.parseAOFFile(tt.key, timestamp, 2048)
+
+			if tt.shouldError {
+				assert.Error(t, err)
+				assert.Nil(t, aofFile)
+			} else {
+				assert.NoError(t, err)
+				assert.NotNil(t, aofFile)
+				assert.Equal(t, tt.expectedID, aofFile.ReplicationID)
+				assert.Equal(t, tt.expectedTS, aofFile.Timestamp)
+				assert.Equal(t, tt.key, aofFile.Key)
+			}
+		})
+	}
+}
+
+func TestFindMatchingAOFFiles(t *testing.T) {
+	mockStore := NewMockObjectStore(testBucket)
+	service := NewService(mockStore)
+
+	rdbFile := &RDBFile{
+		Key:           "redis-backups/abc123/dump-20241225-120000.rdb",
+		ReplicationID: "abc123",
+		Timestamp:     "20241225-120000",
+	}
+
+	aofFiles := []AOFFile{
+		{
+			Key:           "redis-backups/abc123/appendonly-20241225-120000.aof",
+			ReplicationID: "abc123",
+			Timestamp:     "20241225-120000",
+		},
+		{
+			Key:           "redis-backups/def456/appendonly-20241225-120000.aof",
+			ReplicationID: "def456", // Different replication ID
+			Timestamp:     "20241225-120000",
+		},
+		{
+			Key:           "redis-backups/abc123/appendonly-20241225-130000.aof",
+			ReplicationID: "abc123",
+			Timestamp:     "20241225-130000", // Different timestamp
+		},
+	}
+
+	matchingAOFs := service.findMatchingAOFFiles(rdbFile, aofFiles)
+
+	// Should only match the first AOF file (same replication ID and timestamp)
+	assert.Len(t, matchingAOFs, 1)
+	assert.Equal(t, "redis-backups/abc123/appendonly-20241225-120000.aof", matchingAOFs[0].Key)
 }
