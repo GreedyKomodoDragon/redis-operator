@@ -13,14 +13,19 @@ import (
 )
 
 type BackupService struct {
-	s3Bucket    string
-	s3Enabled   bool
+	S3Bucket    string
+	S3Enabled   bool
 	redisClient *RedisClient
-	s3Uploader  *S3Uploader
 	logger      *slog.Logger
 
+	// New object-oriented components
+	backupManager *BackupObjectManager
+
+	// Backup retention settings
+	retentionCount int
+
 	// Replication state
-	replID     string
+	ReplID     string
 	replOffset int64
 }
 
@@ -69,17 +74,20 @@ func (s *BackupService) initialize() error {
 	maxRetryDelay := time.Duration(getEnvIntOrDefault("MAX_RETRY_DELAY_SECONDS", 300)) * time.Second
 	s.redisClient.SetRetryConfig(maxRetries, retryDelay, maxRetryDelay)
 
-	// S3 configuration - required for backup
-	s.s3Bucket = os.Getenv("S3_BUCKET")
-	s.s3Enabled = s.s3Bucket != ""
+	// Backup retention configuration
+	s.retentionCount = getEnvIntOrDefault("BACKUP_RETENTION", 7) // Default to keeping 7 backups
 
-	if !s.s3Enabled {
+	// S3 configuration - required for backup
+	s.S3Bucket = os.Getenv("S3_BUCKET")
+	s.S3Enabled = s.S3Bucket != ""
+
+	if !s.S3Enabled {
 		return fmt.Errorf("S3_BUCKET environment variable is required - backup service only supports S3 storage")
 	}
 
 	// Initialize S3 uploader
 	s3Config := S3Config{
-		Bucket:          s.s3Bucket,
+		Bucket:          s.S3Bucket,
 		Region:          getEnvOrDefault("AWS_REGION", "us-east-1"),
 		Endpoint:        os.Getenv("AWS_ENDPOINT_URL"),
 		AccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
@@ -89,18 +97,23 @@ func (s *BackupService) initialize() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	uploader, err := NewS3Uploader(ctx, s3Config)
+	// Create S3 client
+	s3Client, err := NewS3Client(ctx, s3Config)
 	if err != nil {
-		return fmt.Errorf("failed to create S3 uploader: %v", err)
+		return fmt.Errorf("failed to create S3 client: %v", err)
 	}
-	s.s3Uploader = uploader
+
+	// Initialize new object-oriented backup manager
+	uploader := NewS3Uploader(ctx, s3Client, s3Config.Bucket)
+	retentionManager := NewS3RetentionManager(s3Client, s3Config.Bucket, s.logger)
+	s.backupManager = NewBackupObjectManager(uploader, retentionManager, s.logger)
 
 	s.logger.Info("Backup service initialized",
 		"redis_host", redisHost,
 		"redis_port", redisPort,
 		"tls_enabled", tlsEnabled,
-		"s3_enabled", s.s3Enabled,
-		"s3_bucket", s.s3Bucket,
+		"s3_enabled", s.S3Enabled,
+		"s3_bucket", s.S3Bucket,
 	)
 	return nil
 }
@@ -156,10 +169,10 @@ func (s *BackupService) runAsReplica(ctx context.Context) error {
 		return fmt.Errorf("PSYNC failed: %v", err)
 	}
 
-	s.replID = replInfo.ID
+	s.ReplID = replInfo.ID
 	s.replOffset = replInfo.Offset
 	s.logger.Info("Acting as Redis replica",
-		"replication_id", s.replID,
+		"replication_id", s.ReplID,
 		"replication_offset", s.replOffset,
 	)
 
@@ -190,36 +203,37 @@ func (s *BackupService) streamRDBToS3() error {
 
 	// Generate S3 key
 	timestamp := time.Now().Format("20060102-150405")
-	s3Key := fmt.Sprintf("redis-backups/%s/dump-%s.rdb", s.replID, timestamp)
+	s3Key := fmt.Sprintf("redis-backups/%s/dump-%s.rdb", s.ReplID, timestamp)
 
 	// Metadata for the backup
 	metadata := map[string]string{
 		"uploaded-by":        "redis-operator",
 		"timestamp":          fmt.Sprintf("%d", time.Now().Unix()),
-		"replication-id":     s.replID,
+		"replication-id":     s.ReplID,
 		"replication-offset": fmt.Sprintf("%d", s.replOffset),
 		"backup-type":        "rdb",
 	}
 
-	// Upload stream to S3 with progress tracking
+	// Upload stream to S3 with progress tracking and retention management
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	location, err := s.s3Uploader.UploadStreamWithProgress(ctx, reader, s3Key, metadata, func(bytes int64) {
+	progressCallback := func(bytes int64) {
 		if bytes%(1024*1024) == 0 { // Log every MB
 			s.logger.Debug("RDB upload progress", "bytes_uploaded", bytes)
 		}
-	})
+	}
 
+	err = s.backupManager.UploadWithProgressAndRetention(ctx, reader, s3Key, metadata, s.ReplID, s.retentionCount, progressCallback)
 	if err != nil {
 		return fmt.Errorf("failed to upload RDB to S3: %v", err)
 	}
 
 	s.logger.Info("RDB snapshot successfully uploaded to S3",
-		"location", location,
 		"size_bytes", len(rdbData),
 		"s3_key", s3Key,
 	)
+
 	return nil
 }
 
@@ -231,13 +245,13 @@ func (s *BackupService) streamCommandsToS3(ctx context.Context) error {
 
 	// Generate S3 key
 	timestamp := time.Now().Format("20060102-150405")
-	s3Key := fmt.Sprintf("redis-backups/%s/appendonly-%s.aof", s.replID, timestamp)
+	s3Key := fmt.Sprintf("redis-backups/%s/appendonly-%s.aof", s.ReplID, timestamp)
 
 	// Metadata for the backup
 	metadata := map[string]string{
 		"uploaded-by":        "redis-operator",
 		"timestamp":          fmt.Sprintf("%d", time.Now().Unix()),
-		"replication-id":     s.replID,
+		"replication-id":     s.ReplID,
 		"replication-offset": fmt.Sprintf("%d", s.replOffset),
 		"backup-type":        "aof",
 	}
@@ -416,6 +430,37 @@ func (s *BackupService) gracefulReconnect() error {
 	return nil
 }
 
+// isValidTimestamp checks if a timestamp string matches the expected format: YYYYMMDD-HHMMSS
+func isValidTimestamp(timestamp string) bool {
+	// Expected format: 20240101-120000
+	if len(timestamp) != 15 {
+		return false
+	}
+
+	// Check for dash in the right position
+	if timestamp[8] != '-' {
+		return false
+	}
+
+	// Check if the date and time parts are numeric
+	datePart := timestamp[:8] // YYYYMMDD
+	timePart := timestamp[9:] // HHMMSS
+
+	for _, r := range datePart {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+
+	for _, r := range timePart {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+
+	return true
+}
+
 // Helper functions for environment variables
 func getEnvOrDefault(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
@@ -439,19 +484,19 @@ func (s *BackupService) uploadStreamToS3(reader io.Reader, s3Key string, metadat
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
-	location, err := s.s3Uploader.UploadStreamWithProgress(ctx, reader, s3Key, metadata, func(bytes int64) {
+	progressCallback := func(bytes int64) {
 		if bytes%(1024*1024) == 0 { // Log every MB
 			s.logger.Debug("AOF upload progress", "bytes_uploaded", bytes)
 		}
-	})
+	}
 
+	err := s.backupManager.UploadWithProgressAndRetention(ctx, reader, s3Key, metadata, s.ReplID, s.retentionCount, progressCallback)
 	if err != nil {
 		uploadComplete <- fmt.Errorf("failed to upload AOF to S3: %v", err)
 		return
 	}
 
 	s.logger.Info("AOF stream successfully uploaded to S3",
-		"location", location,
 		"s3_key", s3Key,
 	)
 	uploadComplete <- nil

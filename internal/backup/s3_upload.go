@@ -9,15 +9,13 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
-// S3Uploader handles uploading files to AWS S3 using AWS SDK
+// S3Uploader handles uploading files to AWS S3 using AWS SDK and implements the Uploader interface
 type S3Uploader struct {
-	client   *s3.Client
+	Client   *s3.Client
 	uploader *manager.Uploader
 	bucket   string
 }
@@ -32,53 +30,12 @@ type S3Config struct {
 }
 
 // NewS3Uploader creates a new S3 uploader using AWS SDK
-func NewS3Uploader(ctx context.Context, s3Config S3Config) (*S3Uploader, error) {
-	var cfg aws.Config
-	var err error
-
-	// Build AWS config based on provided credentials and settings
-	if s3Config.AccessKeyID != "" && s3Config.SecretAccessKey != "" {
-		// Use explicit credentials
-		creds := credentials.NewStaticCredentialsProvider(
-			s3Config.AccessKeyID,
-			s3Config.SecretAccessKey,
-			"", // session token
-		)
-
-		cfg, err = config.LoadDefaultConfig(ctx,
-			config.WithCredentialsProvider(creds),
-			config.WithRegion(s3Config.Region),
-		)
-	} else {
-		// Use default AWS credential chain (environment variables, IAM roles, etc.)
-		cfg, err = config.LoadDefaultConfig(ctx,
-			config.WithRegion(s3Config.Region),
-		)
-	}
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to load AWS config: %v", err)
-	}
-
-	// Configure custom endpoint if provided (for S3-compatible services)
-	var s3Client *s3.Client
-	if s3Config.Endpoint != "" {
-		s3Client = s3.NewFromConfig(cfg, func(o *s3.Options) {
-			o.BaseEndpoint = aws.String(s3Config.Endpoint)
-			o.UsePathStyle = true // Required for most S3-compatible services
-		})
-	} else {
-		s3Client = s3.NewFromConfig(cfg)
-	}
-
-	// Create uploader with the S3 client
-	uploader := manager.NewUploader(s3Client)
-
+func NewS3Uploader(ctx context.Context, s3Client *s3.Client, s3Bucket string) *S3Uploader {
 	return &S3Uploader{
-		client:   s3Client,
-		uploader: uploader,
-		bucket:   s3Config.Bucket,
-	}, nil
+		Client:   s3Client,
+		uploader: manager.NewUploader(s3Client),
+		bucket:   s3Bucket,
+	}
 }
 
 // UploadFile uploads a file to S3 using AWS SDK
@@ -157,42 +114,4 @@ func (pr *ProgressReader) Read(p []byte) (int, error) {
 		}
 	}
 	return n, err
-}
-
-// uploadToS3Enhanced uploads a file to S3 using AWS SDK with proper error handling
-func (s *BackupService) uploadToS3Enhanced(filePath string) error {
-	if !s.s3Enabled {
-		return nil
-	}
-
-	fileName := filepath.Base(filePath)
-	fmt.Printf("Uploading %s to S3 bucket %s...\n", fileName, s.s3Bucket)
-
-	// Build S3 configuration from environment variables
-	s3Config := S3Config{
-		Bucket:          s.s3Bucket,
-		Region:          getEnvOrDefault("AWS_REGION", "us-east-1"),
-		Endpoint:        os.Getenv("AWS_ENDPOINT_URL"), // Optional custom endpoint
-		AccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
-		SecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
-	}
-
-	// Create uploader with timeout context
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-
-	uploader, err := NewS3Uploader(ctx, s3Config)
-	if err != nil {
-		return fmt.Errorf("failed to create S3 uploader: %v", err)
-	}
-
-	// Use replication ID as key prefix for organization
-	keyPrefix := fmt.Sprintf("redis-backups/%s", s.replID)
-
-	if err := uploader.UploadFile(ctx, filePath, keyPrefix); err != nil {
-		return fmt.Errorf("S3 upload failed: %v", err)
-	}
-
-	fmt.Printf("Successfully uploaded %s to S3\n", fileName)
-	return nil
 }

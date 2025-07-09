@@ -34,9 +34,8 @@ func TestStreamingBackupInitialization(t *testing.T) {
 
 	// Should succeed with proper S3 configuration
 	require.NoError(t, err)
-	assert.True(t, service.s3Enabled)
-	assert.Equal(t, "test-bucket", service.s3Bucket)
-	assert.NotNil(t, service.s3Uploader)
+	assert.True(t, service.S3Enabled)
+	assert.Equal(t, "test-bucket", service.S3Bucket)
 	assert.NotNil(t, service.redisClient)
 }
 
