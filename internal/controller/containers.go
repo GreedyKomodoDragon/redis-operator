@@ -273,6 +273,14 @@ func BuildBackupContainer(redis *koncachev1alpha1.Redis) corev1.Container {
 		},
 	}...)
 
+	// Add backup retention configuration
+	if redis.Spec.Backup.Retention > 0 {
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  "BACKUP_RETENTION",
+			Value: fmt.Sprintf("%d", redis.Spec.Backup.Retention),
+		})
+	}
+
 	// Add S3 configuration if backup S3 settings are configured
 	if redis.Spec.Backup.Storage.Type == "s3" && redis.Spec.Backup.Storage.S3 != nil {
 		envVars = append(envVars, corev1.EnvVar{

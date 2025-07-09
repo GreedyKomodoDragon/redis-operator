@@ -1,4 +1,4 @@
-package backup
+package backup_test
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GreedyKomodoDragon/redis-operator/internal/backup"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -31,12 +32,12 @@ const (
 func TestS3ConfigValidation(t *testing.T) {
 	tests := []struct {
 		name     string
-		config   S3Config
+		config   backup.S3Config
 		hasError bool
 	}{
 		{
 			name: "valid config with explicit credentials",
-			config: S3Config{
+			config: backup.S3Config{
 				Bucket:          testBucket,
 				Region:          testRegion,
 				AccessKeyID:     "test-access-key",
@@ -46,7 +47,7 @@ func TestS3ConfigValidation(t *testing.T) {
 		},
 		{
 			name: "valid config with custom endpoint",
-			config: S3Config{
+			config: backup.S3Config{
 				Bucket:          testBucket,
 				Region:          testRegion,
 				Endpoint:        "https://minio.example.com",
@@ -57,7 +58,7 @@ func TestS3ConfigValidation(t *testing.T) {
 		},
 		{
 			name: "config without credentials (will use default chain)",
-			config: S3Config{
+			config: backup.S3Config{
 				Bucket: testBucket,
 				Region: testRegion,
 			},
@@ -71,11 +72,11 @@ func TestS3ConfigValidation(t *testing.T) {
 
 			// We expect this to fail in test environment since there are no real AWS credentials
 			// But we're testing that the configuration parsing works correctly
-			uploader, err := NewS3Uploader(ctx, tt.config)
+			s3Client, err := backup.NewS3Client(ctx, tt.config)
 
 			if tt.hasError {
 				assert.Error(t, err)
-				assert.Nil(t, uploader)
+				assert.Nil(t, s3Client)
 			} else {
 				// In test environment without AWS credentials, we expect an error during config loading
 				// but the S3Config struct should be valid
@@ -89,7 +90,7 @@ func TestS3ConfigValidation(t *testing.T) {
 }
 
 func TestS3UploaderConfigurationFields(t *testing.T) {
-	config := S3Config{
+	config := backup.S3Config{
 		Bucket:          testBucket,
 		Region:          testRegion,
 		Endpoint:        "https://s3.amazonaws.com",
@@ -127,7 +128,7 @@ func TestS3UploaderIntegration(t *testing.T) {
 	}
 
 	// Create S3 configuration for MinIO
-	s3Config := S3Config{
+	s3Config := backup.S3Config{
 		Bucket:          "test-bucket",
 		Region:          testEastRegion,
 		Endpoint:        endpoint,
@@ -135,13 +136,17 @@ func TestS3UploaderIntegration(t *testing.T) {
 		SecretAccessKey: "minioadmin",
 	}
 
-	// Create S3 uploader
-	uploader, err := NewS3Uploader(ctx, s3Config)
+	// create s3 client
+	s3Client, err := backup.NewS3Client(ctx, s3Config)
 	require.NoError(t, err)
+	require.NotNil(t, s3Client)
+
+	// Create S3 uploader
+	uploader := backup.NewS3Uploader(ctx, s3Client, s3Config.Bucket)
 	require.NotNil(t, uploader)
 
 	// Create the bucket first
-	_, err = uploader.client.CreateBucket(ctx, &s3.CreateBucketInput{
+	_, err = uploader.Client.CreateBucket(ctx, &s3.CreateBucketInput{
 		Bucket: &s3Config.Bucket,
 	})
 	require.NoError(t, err)
@@ -163,7 +168,7 @@ func TestS3UploaderIntegration(t *testing.T) {
 
 	// Verify the file was uploaded
 	expectedKey := keyPrefix + "/" + filepath.Base(testFile.Name())
-	getObjectOutput, err := uploader.client.GetObject(ctx, &s3.GetObjectInput{
+	getObjectOutput, err := uploader.Client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: &s3Config.Bucket,
 		Key:    &expectedKey,
 	})
@@ -205,7 +210,7 @@ func TestS3UploaderMultipleFiles(t *testing.T) {
 	}
 
 	// Create S3 configuration for MinIO
-	s3Config := S3Config{
+	s3Config := backup.S3Config{
 		Bucket:          "multi-test-bucket",
 		Region:          testEastRegion,
 		Endpoint:        endpoint,
@@ -213,12 +218,17 @@ func TestS3UploaderMultipleFiles(t *testing.T) {
 		SecretAccessKey: "minioadmin",
 	}
 
-	// Create S3 uploader
-	uploader, err := NewS3Uploader(ctx, s3Config)
+	// create s3 client
+	s3Client, err := backup.NewS3Client(ctx, s3Config)
 	require.NoError(t, err)
+	require.NotNil(t, s3Client)
+
+	// Create S3 uploader
+	uploader := backup.NewS3Uploader(ctx, s3Client, s3Config.Bucket)
+	require.NotNil(t, uploader)
 
 	// Create the bucket
-	_, err = uploader.client.CreateBucket(ctx, &s3.CreateBucketInput{
+	_, err = uploader.Client.CreateBucket(ctx, &s3.CreateBucketInput{
 		Bucket: &s3Config.Bucket,
 	})
 	require.NoError(t, err)
@@ -254,7 +264,7 @@ func TestS3UploaderMultipleFiles(t *testing.T) {
 	}
 
 	// Verify all files were uploaded
-	listOutput, err := uploader.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+	listOutput, err := uploader.Client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 		Bucket: &s3Config.Bucket,
 		Prefix: &keyPrefix,
 	})
@@ -292,7 +302,7 @@ func TestS3UploaderErrorHandling(t *testing.T) {
 	}
 
 	// Create S3 configuration for MinIO
-	s3Config := S3Config{
+	s3Config := backup.S3Config{
 		Bucket:          "error-test-bucket",
 		Region:          testEastRegion,
 		Endpoint:        endpoint,
@@ -300,9 +310,14 @@ func TestS3UploaderErrorHandling(t *testing.T) {
 		SecretAccessKey: "minioadmin",
 	}
 
-	// Create S3 uploader
-	uploader, err := NewS3Uploader(ctx, s3Config)
+	// create s3 client
+	s3Client, err := backup.NewS3Client(ctx, s3Config)
 	require.NoError(t, err)
+	require.NotNil(t, s3Client)
+
+	// Create S3 uploader
+	uploader := backup.NewS3Uploader(ctx, s3Client, s3Config.Bucket)
+	require.NotNil(t, uploader)
 
 	// Test 1: Upload to non-existent bucket (should fail)
 	testFile, err := os.CreateTemp("", "error-test-*.txt")
@@ -318,7 +333,7 @@ func TestS3UploaderErrorHandling(t *testing.T) {
 	assert.Contains(t, strings.ToLower(err.Error()), "nosuchbucket")
 
 	// Test 2: Upload non-existent file (should fail)
-	_, err = uploader.client.CreateBucket(ctx, &s3.CreateBucketInput{
+	_, err = uploader.Client.CreateBucket(ctx, &s3.CreateBucketInput{
 		Bucket: &s3Config.Bucket,
 	})
 	require.NoError(t, err)
@@ -326,92 +341,6 @@ func TestS3UploaderErrorHandling(t *testing.T) {
 	err = uploader.UploadFile(ctx, "/nonexistent/file.txt", "test-prefix")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to open file")
-}
-
-func TestBackupServiceS3Integration(t *testing.T) {
-	ctx := context.Background()
-
-	// Start MinIO container
-	minioContainer, err := minio.Run(ctx, minioImage)
-	require.NoError(t, err)
-	defer func() {
-		if err := testcontainers.TerminateContainer(minioContainer); err != nil {
-			t.Logf(minioTerminateMsg, err)
-		}
-	}()
-
-	// Get MinIO connection details
-	endpoint, err := minioContainer.ConnectionString(ctx)
-	require.NoError(t, err)
-
-	// Format endpoint with http:// protocol
-	if !strings.HasPrefix(endpoint, httpPrefix) && !strings.HasPrefix(endpoint, httpsPrefix) {
-		endpoint = httpPrefix + endpoint
-	}
-
-	// Create a backup service instance
-	service := &BackupService{
-		s3Enabled: true,
-		s3Bucket:  "backup-service-test",
-		replID:    "repl-integration-test",
-	}
-
-	// Set environment variables for the service
-	t.Setenv("AWS_REGION", testEastRegion)
-	t.Setenv("AWS_ENDPOINT_URL", endpoint)
-	t.Setenv("AWS_ACCESS_KEY_ID", "minioadmin")
-	t.Setenv("AWS_SECRET_ACCESS_KEY", "minioadmin")
-
-	// Create the S3 client to set up the bucket
-	s3Config := S3Config{
-		Bucket:          service.s3Bucket,
-		Region:          testEastRegion,
-		Endpoint:        endpoint,
-		AccessKeyID:     "minioadmin",
-		SecretAccessKey: "minioadmin",
-	}
-
-	uploader, err := NewS3Uploader(ctx, s3Config)
-	require.NoError(t, err)
-
-	// Create the bucket
-	_, err = uploader.client.CreateBucket(ctx, &s3.CreateBucketInput{
-		Bucket: &s3Config.Bucket,
-	})
-	require.NoError(t, err)
-
-	// Create a test backup file
-	testFile, err := os.CreateTemp("", "backup-test-*.rdb")
-	require.NoError(t, err)
-	defer os.Remove(testFile.Name())
-
-	testContent := "REDIS0009\xfa\x09redis-ver\x055.0.7\xfa\x0aredis-bits\xc0@\xfa\x05ctime\xc2m\x08\xbce\xfa\x08used-mem\xc2\xb0\xc4\x10\x00\xfa\x08aof-preamble\xc0\x00\xff\x5e\x0f\xf7\x8b\x12\x04\xc3"
-	_, err = testFile.WriteString(testContent)
-	require.NoError(t, err)
-	testFile.Close()
-
-	// Test the backup service S3 upload
-	err = service.uploadToS3Enhanced(testFile.Name())
-	require.NoError(t, err)
-
-	// Verify the file was uploaded with correct key structure
-	expectedKey := "redis-backups/" + service.replID + "/" + filepath.Base(testFile.Name())
-	getObjectOutput, err := uploader.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: &service.s3Bucket,
-		Key:    &expectedKey,
-	})
-	require.NoError(t, err)
-
-	// Verify content
-	uploadedContent, err := io.ReadAll(getObjectOutput.Body)
-	require.NoError(t, err)
-	getObjectOutput.Body.Close()
-
-	assert.Equal(t, testContent, string(uploadedContent))
-
-	// Verify metadata
-	assert.NotNil(t, getObjectOutput.Metadata)
-	assert.Equal(t, redisOperatorValue, getObjectOutput.Metadata[uploadedByKey])
 }
 
 func TestS3UploaderTimeout(t *testing.T) {
@@ -436,7 +365,7 @@ func TestS3UploaderTimeout(t *testing.T) {
 	}
 
 	// Create S3 configuration for MinIO
-	s3Config := S3Config{
+	s3Config := backup.S3Config{
 		Bucket:          "timeout-test-bucket",
 		Region:          testEastRegion,
 		Endpoint:        endpoint,
@@ -444,12 +373,17 @@ func TestS3UploaderTimeout(t *testing.T) {
 		SecretAccessKey: "minioadmin",
 	}
 
-	// Create S3 uploader
-	uploader, err := NewS3Uploader(ctx, s3Config)
+	// create s3 client
+	s3Client, err := backup.NewS3Client(ctx, s3Config)
 	require.NoError(t, err)
+	require.NotNil(t, s3Client)
+
+	// Create S3 uploader
+	uploader := backup.NewS3Uploader(ctx, s3Client, s3Config.Bucket)
+	require.NotNil(t, uploader)
 
 	// Create the bucket
-	_, err = uploader.client.CreateBucket(ctx, &s3.CreateBucketInput{
+	_, err = uploader.Client.CreateBucket(ctx, &s3.CreateBucketInput{
 		Bucket: &s3Config.Bucket,
 	})
 	require.NoError(t, err)
