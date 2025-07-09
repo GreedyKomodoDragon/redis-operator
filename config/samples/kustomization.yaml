@@ -1,4 +1,11 @@
 ## Append samples of your project ##
 resources:
 - koncache_v1alpha1_redis.yaml
+- redis-standalone-example.yaml
+- redis-standalone-backup.yaml
+- redis-standalone-backup-advanced.yaml
+- redis-standalone-monitoring.yaml
+- redis-standalone-security.yaml
+- redis-cluster-example.yaml
+- redis-sentinel-example.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

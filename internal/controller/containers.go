@@ -346,3 +346,99 @@ func BuildBackupContainer(redis *koncachev1alpha1.Redis) corev1.Container {
 
 	return backupContainer
 }
+
+// BuildBackupInitContainer builds the init container for Redis backup restore
+func BuildBackupInitContainer(redis *koncachev1alpha1.Redis) corev1.Container {
+	// Build environment variables for backup restore
+	envVars := []corev1.EnvVar{
+		{
+			Name:  "DATA_DIR",
+			Value: "/data", // Redis data directory
+		},
+	}
+
+	// Add S3 configuration if storage is configured
+	if redis.Spec.Backup.Storage.S3 != nil {
+		s3Prefix := redis.Spec.Backup.Storage.S3.Prefix
+		if s3Prefix == "" {
+			s3Prefix = fmt.Sprintf("%s/%s", redis.Namespace, redis.Name)
+		}
+
+		envVars = append(envVars, []corev1.EnvVar{
+			{
+				Name:  "S3_BUCKET",
+				Value: redis.Spec.Backup.Storage.S3.Bucket,
+			},
+			{
+				Name:  "S3_REGION",
+				Value: redis.Spec.Backup.Storage.S3.Region,
+			},
+			{
+				Name:  "S3_PREFIX",
+				Value: s3Prefix,
+			},
+		}...)
+
+		// Add S3 credentials from secret
+		if redis.Spec.Backup.Storage.S3.SecretName != "" {
+			envVars = append(envVars, []corev1.EnvVar{
+				{
+					Name: "AWS_ACCESS_KEY_ID",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: redis.Spec.Backup.Storage.S3.SecretName,
+							},
+							Key: "access-key-id",
+						},
+					},
+				},
+				{
+					Name: "AWS_SECRET_ACCESS_KEY",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: redis.Spec.Backup.Storage.S3.SecretName,
+							},
+							Key: "secret-access-key",
+						},
+					},
+				},
+				{
+					Name: "AWS_ENDPOINT_URL",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: redis.Spec.Backup.Storage.S3.SecretName,
+							},
+							Key:      "endpoint",
+							Optional: &[]bool{true}[0], // Make endpoint optional
+						},
+					},
+				},
+			}...)
+		}
+	}
+
+	// Use the image from BackupInitConfig if specified, otherwise use backup image
+	image := redis.Spec.Backup.Image
+	if redis.Spec.Backup.BackUpInitConfig.Image != "" {
+		image = redis.Spec.Backup.BackUpInitConfig.Image
+	}
+
+	initContainer := corev1.Container{
+		Name:            "backup-init",
+		Image:           image,
+		ImagePullPolicy: redis.Spec.ImagePullPolicy,
+		Command:         []string{"/init-backup"}, // Use the init-backup entrypoint
+		Env:             envVars,
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      "redis-data",
+				MountPath: "/data",
+			},
+		},
+	}
+
+	return initContainer
+}

@@ -960,6 +960,19 @@ spec:
                     description: Annotations specifies additional annotations for
                       the backup pod
                     type: object
+                  backupInitConfig:
+                    description: BackupInit specifies whether to run an init container
+                      for backup
+                    properties:
+                      enabled:
+                        description: Enabled specifies whether to run an init container
+                          for backup
+                        type: boolean
+                      image:
+                        description: Image specifies the init container image for
+                          backup
+                        type: string
+                    type: object
                   enabled:
                     description: Enabled specifies whether backup is enabled
                     type: boolean
@@ -2290,7 +2303,9 @@ spec:
                     - type
                     type: object
                 required:
+                - backupInitConfig
                 - enabled
+                - storage
                 type: object
               cluster:
                 description: Cluster specifies cluster-specific configuration (only

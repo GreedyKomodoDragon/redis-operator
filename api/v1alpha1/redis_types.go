@@ -496,7 +496,10 @@ type RedisBackup struct {
 	Retention int32 `json:"retention,omitempty"`
 
 	// Storage specifies backup storage configuration
-	Storage RedisBackupStorage `json:"storage,omitempty"`
+	Storage RedisBackupStorage `json:"storage"`
+
+	// BackupInit specifies whether to run an init container for backup
+	BackUpInitConfig BackupInitConfig `json:"backupInitConfig"`
 
 	// PodTemplate specifies the pod template for backup jobs
 	PodTemplate PodSpec `json:"podTemplate,omitempty"`
@@ -521,6 +524,14 @@ type RedisBackupStorage struct {
 
 	// S3 specifies S3 storage configuration
 	S3 *RedisS3Storage `json:"s3,omitempty"`
+}
+
+type BackupInitConfig struct {
+	// Enabled specifies whether to run an init container for backup
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Image specifies the init container image for backup
+	Image string `json:"image,omitempty"`
 }
 
 // RedisS3Storage defines S3 storage configuration

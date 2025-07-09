@@ -375,6 +375,13 @@ func (s *StandaloneController) statefulSetForRedis(redis *koncachev1alpha1.Redis
 	// Add config hash annotation to trigger pod restart when ConfigMap changes
 	podAnnotations["redis-operator/config-hash"] = configHash
 
+	// Build init containers if backup init is enabled
+	var initContainers []corev1.Container
+	if redis.Spec.Backup.BackUpInitConfig.Enabled {
+		backupInitContainer := BuildBackupInitContainer(redis)
+		initContainers = append(initContainers, backupInitContainer)
+	}
+
 	// Build pod template
 	podTemplate := corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
@@ -387,6 +394,7 @@ func (s *StandaloneController) statefulSetForRedis(redis *koncachev1alpha1.Redis
 			Tolerations:        redis.Spec.Tolerations,
 			Affinity:           redis.Spec.Affinity,
 			ImagePullSecrets:   redis.Spec.ImagePullSecrets,
+			InitContainers:     initContainers,
 			Containers:         containers,
 			Volumes:            buildVolumes(redis),
 		},
