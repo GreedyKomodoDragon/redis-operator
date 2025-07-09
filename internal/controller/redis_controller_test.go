@@ -376,3 +376,119 @@ func TestRedisControllerWithTLS(t *testing.T) {
 	assert.Contains(t, configData, "tls-port")
 	assert.Contains(t, configData, "port 0") // Regular port should be disabled when TLS is enabled
 }
+
+func TestStandaloneControllerBackupInitContainer(t *testing.T) {
+	// Setup test scheme
+	testScheme := runtime.NewScheme()
+	require.NoError(t, scheme.AddToScheme(testScheme))
+	require.NoError(t, koncachev1alpha1.AddToScheme(testScheme))
+
+	tests := []struct {
+		name                      string
+		backupInitEnabled         bool
+		backupInitImage           string
+		expectInitContainer       bool
+		expectedInitContainerName string
+	}{
+		{
+			name:                "backup init disabled",
+			backupInitEnabled:   false,
+			expectInitContainer: false,
+		},
+		{
+			name:                      "backup init enabled with default image",
+			backupInitEnabled:         true,
+			expectInitContainer:       true,
+			expectedInitContainerName: "backup-init",
+		},
+		{
+			name:                      "backup init enabled with custom image",
+			backupInitEnabled:         true,
+			backupInitImage:           "custom-backup-init:v1.0.0",
+			expectInitContainer:       true,
+			expectedInitContainerName: "backup-init",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			redis := &koncachev1alpha1.Redis{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-redis-init",
+					Namespace: "default",
+				},
+				Spec: koncachev1alpha1.RedisSpec{
+					Image:           "redis:7.2-alpine",
+					ImagePullPolicy: corev1.PullIfNotPresent,
+					Storage: koncachev1alpha1.RedisStorage{
+						Size:             resource.MustParse("1Gi"),
+						StorageClassName: getTestStorageClassNamePtr(),
+						AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					},
+					ServiceType: corev1.ServiceTypeClusterIP,
+					Backup: koncachev1alpha1.RedisBackup{
+						Enabled: true,
+						Image:   "backup:latest",
+						BackUpInitConfig: koncachev1alpha1.BackupInitConfig{
+							Enabled: tt.backupInitEnabled,
+							Image:   tt.backupInitImage,
+						},
+						Storage: koncachev1alpha1.RedisBackupStorage{
+							Type: "s3",
+							S3: &koncachev1alpha1.RedisS3Storage{
+								Bucket:     "test-bucket",
+								Region:     "us-west-2",
+								SecretName: "s3-credentials",
+							},
+						},
+					},
+				},
+			}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(testScheme).
+				WithObjects(redis).
+				Build()
+
+			controller := NewStandaloneController(fakeClient, testScheme)
+
+			// Generate Redis config and config hash
+			redisConfig := BuildRedisConfig(redis)
+			configHash := ComputeStringHash(redisConfig)
+
+			// Create StatefulSet using the controller's method
+			statefulSet := controller.statefulSetForRedis(redis, redisConfig, configHash)
+
+			// Verify init containers
+			if tt.expectInitContainer {
+				require.Len(t, statefulSet.Spec.Template.Spec.InitContainers, 1, "StatefulSet should have one init container")
+				initContainer := statefulSet.Spec.Template.Spec.InitContainers[0]
+				assert.Equal(t, tt.expectedInitContainerName, initContainer.Name)
+				assert.Equal(t, []string{"/init-backup"}, initContainer.Command)
+
+				// Check image
+				expectedImage := redis.Spec.Backup.Image
+				if tt.backupInitImage != "" {
+					expectedImage = tt.backupInitImage
+				}
+				assert.Equal(t, expectedImage, initContainer.Image)
+
+				// Check volume mounts
+				require.Len(t, initContainer.VolumeMounts, 1, "Init container should have one volume mount")
+				assert.Equal(t, "redis-data", initContainer.VolumeMounts[0].Name)
+				assert.Equal(t, "/data", initContainer.VolumeMounts[0].MountPath)
+
+				// Check environment variables
+				envVarMap := make(map[string]corev1.EnvVar)
+				for _, env := range initContainer.Env {
+					envVarMap[env.Name] = env
+				}
+				assert.Equal(t, "/data", envVarMap["DATA_DIR"].Value)
+				assert.Equal(t, "test-bucket", envVarMap["S3_BUCKET"].Value)
+				assert.Equal(t, "us-west-2", envVarMap["S3_REGION"].Value)
+			} else {
+				assert.Len(t, statefulSet.Spec.Template.Spec.InitContainers, 0, "StatefulSet should have no init containers")
+			}
+		})
+	}
+}

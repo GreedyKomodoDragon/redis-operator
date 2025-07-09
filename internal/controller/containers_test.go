@@ -277,3 +277,121 @@ func TestBuildBackupContainer(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildBackupInitContainer(t *testing.T) {
+	tests := []struct {
+		name          string
+		redis         *koncachev1alpha1.Redis
+		expectedImage string
+		checkS3       bool
+		checkAuth     bool
+	}{
+		{
+			name: "basic backup init container without S3",
+			redis: &koncachev1alpha1.Redis{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-redis",
+					Namespace: "default",
+				},
+				Spec: koncachev1alpha1.RedisSpec{
+					ImagePullPolicy: corev1.PullIfNotPresent,
+					Backup: koncachev1alpha1.RedisBackup{
+						Enabled: true,
+						Image:   "backup:latest",
+						BackUpInitConfig: koncachev1alpha1.BackupInitConfig{
+							Enabled: true,
+						},
+					},
+				},
+			},
+			expectedImage: "backup:latest",
+			checkS3:       false,
+			checkAuth:     false,
+		},
+		{
+			name: "backup init container with S3 storage",
+			redis: &koncachev1alpha1.Redis{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-redis",
+					Namespace: "default",
+				},
+				Spec: koncachev1alpha1.RedisSpec{
+					ImagePullPolicy: corev1.PullIfNotPresent,
+					Backup: koncachev1alpha1.RedisBackup{
+						Enabled: true,
+						Image:   "backup:latest",
+						BackUpInitConfig: koncachev1alpha1.BackupInitConfig{
+							Enabled: true,
+							Image:   "backup-init:latest",
+						},
+						Storage: koncachev1alpha1.RedisBackupStorage{
+							Type: "s3",
+							S3: &koncachev1alpha1.RedisS3Storage{
+								Bucket:     "test-bucket",
+								Region:     "us-west-2",
+								Prefix:     "redis-backups",
+								SecretName: "s3-credentials",
+							},
+						},
+					},
+				},
+			},
+			expectedImage: "backup-init:latest",
+			checkS3:       true,
+			checkAuth:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := controller.BuildBackupInitContainer(tt.redis)
+
+			// Verify basic container properties
+			assert.Equal(t, "backup-init", result.Name)
+			assert.Equal(t, tt.expectedImage, result.Image)
+			assert.Equal(t, tt.redis.Spec.ImagePullPolicy, result.ImagePullPolicy)
+			assert.Equal(t, []string{"/init-backup"}, result.Command)
+
+			// Verify volume mounts
+			require.Len(t, result.VolumeMounts, 1, "Init container should have one volume mount")
+			assert.Equal(t, "redis-data", result.VolumeMounts[0].Name)
+			assert.Equal(t, "/data", result.VolumeMounts[0].MountPath)
+
+			// Convert environment variables to a map for easier testing
+			envVarMap := make(map[string]corev1.EnvVar)
+			for _, env := range result.Env {
+				envVarMap[env.Name] = env
+			}
+
+			// Verify basic environment variables
+			assert.Equal(t, "/data", envVarMap["DATA_DIR"].Value)
+
+			// Verify S3 configuration if applicable
+			if tt.checkS3 {
+				s3Config := tt.redis.Spec.Backup.Storage.S3
+				assert.Equal(t, s3Config.Bucket, envVarMap["S3_BUCKET"].Value)
+				assert.Equal(t, s3Config.Region, envVarMap["S3_REGION"].Value)
+				assert.Equal(t, s3Config.Prefix, envVarMap["S3_PREFIX"].Value)
+
+				// Verify S3 credentials
+				if s3Config.SecretName != "" {
+					assert.NotNil(t, envVarMap["AWS_ACCESS_KEY_ID"].ValueFrom)
+					assert.NotNil(t, envVarMap["AWS_ACCESS_KEY_ID"].ValueFrom.SecretKeyRef)
+					assert.Equal(t, s3Config.SecretName, envVarMap["AWS_ACCESS_KEY_ID"].ValueFrom.SecretKeyRef.Name)
+					assert.Equal(t, "access-key-id", envVarMap["AWS_ACCESS_KEY_ID"].ValueFrom.SecretKeyRef.Key)
+
+					assert.NotNil(t, envVarMap["AWS_SECRET_ACCESS_KEY"].ValueFrom)
+					assert.NotNil(t, envVarMap["AWS_SECRET_ACCESS_KEY"].ValueFrom.SecretKeyRef)
+					assert.Equal(t, s3Config.SecretName, envVarMap["AWS_SECRET_ACCESS_KEY"].ValueFrom.SecretKeyRef.Name)
+					assert.Equal(t, "secret-access-key", envVarMap["AWS_SECRET_ACCESS_KEY"].ValueFrom.SecretKeyRef.Key)
+
+					// Verify endpoint configuration (optional)
+					assert.NotNil(t, envVarMap["AWS_ENDPOINT_URL"].ValueFrom)
+					assert.NotNil(t, envVarMap["AWS_ENDPOINT_URL"].ValueFrom.SecretKeyRef)
+					assert.Equal(t, s3Config.SecretName, envVarMap["AWS_ENDPOINT_URL"].ValueFrom.SecretKeyRef.Name)
+					assert.Equal(t, "endpoint", envVarMap["AWS_ENDPOINT_URL"].ValueFrom.SecretKeyRef.Key)
+				}
+			}
+		})
+	}
+}
