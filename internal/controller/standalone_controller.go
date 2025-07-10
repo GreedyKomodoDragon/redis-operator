@@ -92,11 +92,14 @@ func (s *StandaloneController) Reconcile(ctx context.Context, redis *koncachev1a
 
 	// Create or update StatefulSet
 	configHash := ComputeStringHash(redisConfig)
+	log.V(1).Info("Generated Redis config", "hash", configHash, "config_length", len(redisConfig))
 	statefulSet, requeue, err := s.reconcileStatefulSet(ctx, redis, redisConfig, configHash)
 	if err != nil {
 		log.Error(err, "Failed to reconcile StatefulSet")
 		return ctrl.Result{}, err
 	}
+
+	// If the StatefulSet was created or updated, requeue to wait for it to be ready
 	if requeue {
 		return ctrl.Result{Requeue: true}, nil
 	}
@@ -247,7 +250,12 @@ func (s *StandaloneController) reconcileStatefulSet(ctx context.Context, redis *
 		return nil, false, err
 	}
 
-	if !s.needsStatefulSetUpdate(foundStatefulSet, statefulSet) {
+	needsUpdate := s.needsStatefulSetUpdate(foundStatefulSet, statefulSet)
+	log.V(1).Info("StatefulSet update check completed",
+		statefulSetNameField, foundStatefulSet.Name,
+		"needs_update", needsUpdate)
+
+	if !needsUpdate {
 		log.V(1).Info("StatefulSet is up-to-date, no changes needed", statefulSetNameField, foundStatefulSet.Name)
 		// No changes needed, return the existing StatefulSet and do not requeue
 		return foundStatefulSet, false, nil
@@ -575,9 +583,19 @@ func (s *StandaloneController) backupStatefulSetForRedis(redis *koncachev1alpha1
 
 // needsStatefulSetUpdate checks if the StatefulSet needs to be updated based on the Redis spec
 func (s *StandaloneController) needsStatefulSetUpdate(existing, desired *appsv1.StatefulSet) bool {
-	return s.hasBasicSpecChanges(existing, desired) || // Check basic spec differences
-		s.hasContainerChanges(existing, desired) || // Check container differences
-		s.hasMetadataChanges(existing, desired) // Check metadata differences
+	log := logf.Log.WithValues("statefulset", existing.Name)
+
+	basicChanges := s.hasBasicSpecChanges(existing, desired)
+	containerChanges := s.hasContainerChanges(existing, desired)
+	metadataChanges := s.hasMetadataChanges(existing, desired)
+
+	log.V(1).Info("StatefulSet update analysis",
+		"statefulset", desired.Name,
+		"basic_changes", basicChanges,
+		"container_changes", containerChanges,
+		"metadata_changes", metadataChanges)
+
+	return basicChanges || containerChanges || metadataChanges
 }
 
 // hasBasicSpecChanges checks for basic StatefulSet spec changes
@@ -648,12 +666,46 @@ func (s *StandaloneController) hasPortChanges(existing, desired *corev1.Containe
 
 // hasMetadataChanges checks for metadata changes
 func (s *StandaloneController) hasMetadataChanges(existing, desired *appsv1.StatefulSet) bool {
-	return !EqualStringMaps(existing.Spec.Template.Spec.NodeSelector, desired.Spec.Template.Spec.NodeSelector) ||
-		!EqualStringMaps(existing.Spec.Template.Annotations, desired.Spec.Template.Annotations) ||
-		!EqualStringMaps(existing.Spec.Template.Labels, desired.Spec.Template.Labels) ||
-		!EqualStringMaps(existing.Labels, desired.Labels) ||
-		!EqualStringMaps(existing.Annotations, desired.Annotations) ||
-		!EqualTolerations(existing.Spec.Template.Spec.Tolerations, desired.Spec.Template.Spec.Tolerations)
+	log := logf.Log.WithValues("statefulset", existing.Name)
+
+	nodeSelectorsEqual := EqualStringMaps(existing.Spec.Template.Spec.NodeSelector, desired.Spec.Template.Spec.NodeSelector)
+	annotationsEqual := EqualStringMaps(existing.Spec.Template.Annotations, desired.Spec.Template.Annotations)
+	labelsEqual := EqualStringMaps(existing.Spec.Template.Labels, desired.Spec.Template.Labels)
+	statefulSetLabelsEqual := EqualStringMaps(existing.Labels, desired.Labels)
+	statefulSetAnnotationsEqual := EqualStringMaps(existing.Annotations, desired.Annotations)
+	tolerationsEqual := EqualTolerations(existing.Spec.Template.Spec.Tolerations, desired.Spec.Template.Spec.Tolerations)
+
+	hasChanges := !nodeSelectorsEqual || !annotationsEqual || !labelsEqual || !statefulSetLabelsEqual || !statefulSetAnnotationsEqual || !tolerationsEqual
+
+	log.V(1).Info("Metadata changes analysis",
+		"statefulset", desired.Name,
+		"node_selectors_equal", nodeSelectorsEqual,
+		"annotations_equal", annotationsEqual,
+		"labels_equal", labelsEqual,
+		"statefulset_labels_equal", statefulSetLabelsEqual,
+		"statefulset_annotations_equal", statefulSetAnnotationsEqual,
+		"tolerations_equal", tolerationsEqual,
+		"has_changes", hasChanges)
+
+	if !annotationsEqual {
+		existingConfigHash := ""
+		desiredConfigHash := ""
+		if existing.Spec.Template.Annotations != nil {
+			existingConfigHash = existing.Spec.Template.Annotations["redis-operator/config-hash"]
+		}
+		if desired.Spec.Template.Annotations != nil {
+			desiredConfigHash = desired.Spec.Template.Annotations["redis-operator/config-hash"]
+		}
+
+		log.V(1).Info("Pod template annotations differ",
+			"statefulset", desired.Name,
+			"existing_config_hash", existingConfigHash,
+			"desired_config_hash", desiredConfigHash,
+			"existing_annotations", existing.Spec.Template.Annotations,
+			"desired_annotations", desired.Spec.Template.Annotations)
+	}
+
+	return hasChanges
 }
 
 // needsBackupStatefulSetUpdate checks if the backup StatefulSet needs to be updated

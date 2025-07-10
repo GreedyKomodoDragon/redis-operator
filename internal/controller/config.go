@@ -2,6 +2,7 @@ package controller
 
 import (
 	"fmt"
+	"sort"
 
 	koncachev1alpha1 "github.com/GreedyKomodoDragon/redis-operator/api/v1alpha1"
 )
@@ -46,8 +47,17 @@ func BuildRedisConfig(redis *koncachev1alpha1.Redis) string {
 	config += BuildSecurityConfig(redis)
 
 	// Additional custom configuration
-	for key, value := range redis.Spec.Config.AdditionalConfig {
-		config += fmt.Sprintf("%s %s\n", key, value)
+	if len(redis.Spec.Config.AdditionalConfig) > 0 {
+		// Sort keys to ensure deterministic config generation
+		keys := make([]string, 0, len(redis.Spec.Config.AdditionalConfig))
+		for key := range redis.Spec.Config.AdditionalConfig {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+
+		for _, key := range keys {
+			config += fmt.Sprintf("%s %s\n", key, redis.Spec.Config.AdditionalConfig[key])
+		}
 	}
 
 	// Default settings if config is empty

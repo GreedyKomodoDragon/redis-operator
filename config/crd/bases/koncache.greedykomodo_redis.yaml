@@ -3376,6 +3376,78 @@ spec:
                 description: Port specifies the Redis port
                 format: int32
                 type: integer
+              probes:
+                description: Probes specifies health probe configuration
+                properties:
+                  livenessProbe:
+                    description: LivenessProbe specifies liveness probe configuration
+                    properties:
+                      enabled:
+                        default: true
+                        description: Enabled specifies whether the probe is enabled
+                        type: boolean
+                      failureThreshold:
+                        default: 3
+                        description: FailureThreshold specifies the failure threshold
+                        format: int32
+                        type: integer
+                      initialDelaySeconds:
+                        default: 30
+                        description: InitialDelaySeconds specifies the initial delay
+                          before probes start
+                        format: int32
+                        type: integer
+                      periodSeconds:
+                        default: 10
+                        description: PeriodSeconds specifies how often the probe runs
+                        format: int32
+                        type: integer
+                      successThreshold:
+                        default: 1
+                        description: SuccessThreshold specifies the success threshold
+                        format: int32
+                        type: integer
+                      timeoutSeconds:
+                        default: 5
+                        description: TimeoutSeconds specifies the probe timeout
+                        format: int32
+                        type: integer
+                    type: object
+                  readinessProbe:
+                    description: ReadinessProbe specifies readiness probe configuration
+                    properties:
+                      enabled:
+                        default: true
+                        description: Enabled specifies whether the probe is enabled
+                        type: boolean
+                      failureThreshold:
+                        default: 3
+                        description: FailureThreshold specifies the failure threshold
+                        format: int32
+                        type: integer
+                      initialDelaySeconds:
+                        default: 30
+                        description: InitialDelaySeconds specifies the initial delay
+                          before probes start
+                        format: int32
+                        type: integer
+                      periodSeconds:
+                        default: 10
+                        description: PeriodSeconds specifies how often the probe runs
+                        format: int32
+                        type: integer
+                      successThreshold:
+                        default: 1
+                        description: SuccessThreshold specifies the success threshold
+                        format: int32
+                        type: integer
+                      timeoutSeconds:
+                        default: 5
+                        description: TimeoutSeconds specifies the probe timeout
+                        format: int32
+                        type: integer
+                    type: object
+                type: object
               resources:
                 description: Resources specifies the resource requirements for the
                   Redis container

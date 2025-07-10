@@ -109,6 +109,9 @@ type RedisSpec struct {
 
 	// Networking specifies advanced networking configuration
 	Networking *RedisNetworking `json:"networking,omitempty"`
+
+	// Probes specifies health probe configuration
+	Probes *RedisProbes `json:"probes,omitempty"`
 }
 
 // RedisStorage defines storage configuration for Redis
@@ -409,6 +412,42 @@ type RedisPodDisruptionBudget struct {
 
 	// MaxUnavailable specifies the maximum number of unavailable pods
 	MaxUnavailable *int32 `json:"maxUnavailable,omitempty"`
+}
+
+// RedisProbes defines health probe configuration
+type RedisProbes struct {
+	// LivenessProbe specifies liveness probe configuration
+	LivenessProbe *RedisProbeConfig `json:"livenessProbe,omitempty"`
+
+	// ReadinessProbe specifies readiness probe configuration
+	ReadinessProbe *RedisProbeConfig `json:"readinessProbe,omitempty"`
+}
+
+// RedisProbeConfig defines individual probe configuration
+type RedisProbeConfig struct {
+	// Enabled specifies whether the probe is enabled
+	// +kubebuilder:default=true
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// InitialDelaySeconds specifies the initial delay before probes start
+	// +kubebuilder:default=30
+	InitialDelaySeconds *int32 `json:"initialDelaySeconds,omitempty"`
+
+	// PeriodSeconds specifies how often the probe runs
+	// +kubebuilder:default=10
+	PeriodSeconds *int32 `json:"periodSeconds,omitempty"`
+
+	// TimeoutSeconds specifies the probe timeout
+	// +kubebuilder:default=5
+	TimeoutSeconds *int32 `json:"timeoutSeconds,omitempty"`
+
+	// FailureThreshold specifies the failure threshold
+	// +kubebuilder:default=3
+	FailureThreshold *int32 `json:"failureThreshold,omitempty"`
+
+	// SuccessThreshold specifies the success threshold
+	// +kubebuilder:default=1
+	SuccessThreshold *int32 `json:"successThreshold,omitempty"`
 }
 
 // RedisSecurity defines security configuration
