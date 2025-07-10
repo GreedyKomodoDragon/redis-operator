@@ -281,6 +281,14 @@ func BuildBackupContainer(redis *koncachev1alpha1.Redis) corev1.Container {
 		})
 	}
 
+	// Add fixed backup ID based on Redis instance name and namespace
+	// This ensures retention works across Redis restarts and replication ID changes
+	backupID := fmt.Sprintf("%s-%s", redis.Namespace, redis.Name)
+	envVars = append(envVars, corev1.EnvVar{
+		Name:  "BACKUP_ID",
+		Value: backupID,
+	})
+
 	// Add S3 configuration if backup S3 settings are configured
 	if redis.Spec.Backup.Storage.Type == "s3" && redis.Spec.Backup.Storage.S3 != nil {
 		envVars = append(envVars, corev1.EnvVar{

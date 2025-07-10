@@ -40,7 +40,7 @@ func BuildSecurityProbes(redis *koncachev1alpha1.Redis, port int32) (*corev1.Pro
 			},
 			InitialDelaySeconds: 5,
 			PeriodSeconds:       10,
-			TimeoutSeconds:      1,
+			TimeoutSeconds:      5,
 			FailureThreshold:    3,
 		}
 	} else if tlsEnabled {
@@ -68,7 +68,7 @@ func BuildSecurityProbes(redis *koncachev1alpha1.Redis, port int32) (*corev1.Pro
 			},
 			InitialDelaySeconds: 5,
 			PeriodSeconds:       10,
-			TimeoutSeconds:      1,
+			TimeoutSeconds:      5,
 			FailureThreshold:    3,
 		}
 	} else if authEnabled {
@@ -96,7 +96,7 @@ func BuildSecurityProbes(redis *koncachev1alpha1.Redis, port int32) (*corev1.Pro
 			},
 			InitialDelaySeconds: 5,
 			PeriodSeconds:       10,
-			TimeoutSeconds:      1,
+			TimeoutSeconds:      5,
 			FailureThreshold:    3,
 		}
 	} else {
@@ -121,7 +121,7 @@ func BuildSecurityProbes(redis *koncachev1alpha1.Redis, port int32) (*corev1.Pro
 			},
 			InitialDelaySeconds: 5,
 			PeriodSeconds:       10,
-			TimeoutSeconds:      1,
+			TimeoutSeconds:      5,
 			FailureThreshold:    3,
 		}
 	}
