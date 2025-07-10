@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -27,6 +28,7 @@ const (
 	configMapNamespaceField      = "ConfigMap.Namespace"
 	serviceMonitorNameField      = "ServiceMonitor.Name"
 	serviceMonitorNamespaceField = "ServiceMonitor.Namespace"
+	configHashField              = "redis-operator/config-hash"
 )
 
 // StandaloneController handles the reconciliation of standalone Redis instances
@@ -376,12 +378,11 @@ func (s *StandaloneController) statefulSetForRedis(redis *koncachev1alpha1.Redis
 	// Prepare pod annotations - start with user-specified annotations
 	podAnnotations := make(map[string]string)
 	if redis.Spec.PodAnnotations != nil {
-		for k, v := range redis.Spec.PodAnnotations {
-			podAnnotations[k] = v
-		}
+		maps.Copy(podAnnotations, redis.Spec.PodAnnotations)
 	}
+
 	// Add config hash annotation to trigger pod restart when ConfigMap changes
-	podAnnotations["redis-operator/config-hash"] = configHash
+	podAnnotations[configHashField] = configHash
 
 	// Build init containers if backup init is enabled
 	var initContainers []corev1.Container
@@ -409,9 +410,7 @@ func (s *StandaloneController) statefulSetForRedis(redis *koncachev1alpha1.Redis
 	}
 
 	// Add custom labels if specified
-	for k, v := range redis.Spec.PodLabels {
-		podTemplate.ObjectMeta.Labels[k] = v
-	}
+	maps.Copy(podTemplate.ObjectMeta.Labels, redis.Spec.PodLabels)
 
 	// Build volume claim template
 	volumeClaimTemplate := BuildVolumeClaimTemplate(redis)
@@ -461,7 +460,7 @@ func (s *StandaloneController) updateRedisStatus(ctx context.Context, redis *kon
 func (s *StandaloneController) updateStatusWithRetry(ctx context.Context, redis *koncachev1alpha1.Redis, updateFunc func(*koncachev1alpha1.Redis)) error {
 	const maxRetries = 5
 
-	for i := 0; i < maxRetries; i++ {
+	for i := range maxRetries {
 		// Fetch the latest version of the Redis object
 		currentRedis := &koncachev1alpha1.Redis{}
 		if err := s.Get(ctx, types.NamespacedName{Name: redis.Name, Namespace: redis.Namespace}, currentRedis); err != nil {
@@ -521,24 +520,24 @@ func (s *StandaloneController) reconcileBackupStatefulSet(ctx context.Context, r
 	if err != nil && errors.IsNotFound(err) {
 		log.Info("Creating a new backup StatefulSet",
 			"StatefulSet.Namespace", statefulSetForBackup.Namespace,
-			"StatefulSet.Name", statefulSetForBackup.Name)
+			statefulSetNameField, statefulSetForBackup.Name)
 		return s.Create(ctx, statefulSetForBackup)
 	} else if err != nil {
 		log.Error(err, "Failed to get backup StatefulSet",
 			"StatefulSet.Namespace", statefulSetForBackup.Namespace,
-			"StatefulSet.Name", statefulSetForBackup.Name)
+			statefulSetNameField, statefulSetForBackup.Name)
 		return err
 	}
 
 	// Check if backup StatefulSet needs to be updated
 	if !s.needsBackupStatefulSetUpdate(foundBackupStatefulSet, statefulSetForBackup) {
 		log.V(1).Info("Backup StatefulSet is up-to-date, no changes needed",
-			"StatefulSet.Name", foundBackupStatefulSet.Name)
+			statefulSetNameField, foundBackupStatefulSet.Name)
 		return nil
 	}
 
 	log.Info("Backup StatefulSet spec has changed, updating",
-		"StatefulSet.Name", foundBackupStatefulSet.Name)
+		statefulSetNameField, foundBackupStatefulSet.Name)
 
 	// Update the existing backup StatefulSet with the new spec
 	// Note: VolumeClaimTemplates cannot be updated in StatefulSets, so we only update what's allowed
@@ -731,7 +730,7 @@ func (s *StandaloneController) needsBackupStatefulSetUpdate(existing, desired *a
 	if s.hasVolumeClaimTemplateChanges(existing, desired) {
 		// Log a warning since VolumeClaimTemplates cannot be updated
 		logf.Log.Info("VolumeClaimTemplates differ but cannot be updated in existing StatefulSet",
-			"StatefulSet.Name", existing.Name,
+			statefulSetNameField, existing.Name,
 			"StatefulSet.Namespace", existing.Namespace)
 		// Return false here as we cannot update VolumeClaimTemplates
 		// The operator would need to delete and recreate the StatefulSet manually
