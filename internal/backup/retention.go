@@ -145,10 +145,7 @@ func (rm *S3RetentionManager) groupBackupsByTimestamp(files []BackupFile) map[st
 		if timestamp != "" {
 			groups[timestamp] = append(groups[timestamp], file)
 		} else {
-			// Only log if logger is initialized
-			if rm.logger != nil {
-				rm.logger.Warn("Could not extract timestamp from backup file", "key", file.Key)
-			}
+			rm.logger.Warn("Could not extract timestamp from backup file", "key", file.Key)
 		}
 	}
 

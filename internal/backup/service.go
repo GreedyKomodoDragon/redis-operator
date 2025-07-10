@@ -23,9 +23,9 @@ type BackupService struct {
 
 	// Backup retention settings
 	retentionCount int
+	backupID       string // Fixed backup ID for consistent retention across restarts
 
 	// Replication state
-	ReplID     string
 	replOffset int64
 }
 
@@ -77,6 +77,12 @@ func (s *BackupService) initialize() error {
 	// Backup retention configuration
 	s.retentionCount = getEnvIntOrDefault("BACKUP_RETENTION", 7) // Default to keeping 7 backups
 
+	// Get fixed backup ID for consistent retention across restarts
+	s.backupID = getEnvOrDefault("BACKUP_ID", "default")
+	if s.backupID == "default" {
+		s.logger.Warn("No BACKUP_ID provided, using 'default' - retention may not work properly across restarts")
+	}
+
 	// S3 configuration - required for backup
 	s.S3Bucket = os.Getenv("S3_BUCKET")
 	s.S3Enabled = s.S3Bucket != ""
@@ -114,6 +120,8 @@ func (s *BackupService) initialize() error {
 		"tls_enabled", tlsEnabled,
 		"s3_enabled", s.S3Enabled,
 		"s3_bucket", s.S3Bucket,
+		"backup_id", s.backupID,
+		"retention_count", s.retentionCount,
 	)
 	return nil
 }
@@ -169,10 +177,9 @@ func (s *BackupService) runAsReplica(ctx context.Context) error {
 		return fmt.Errorf("PSYNC failed: %v", err)
 	}
 
-	s.ReplID = replInfo.ID
 	s.replOffset = replInfo.Offset
 	s.logger.Info("Acting as Redis replica",
-		"replication_id", s.ReplID,
+		"replication_id", s.backupID,
 		"replication_offset", s.replOffset,
 	)
 
@@ -201,15 +208,15 @@ func (s *BackupService) streamRDBToS3() error {
 	// Create a reader from the RDB data
 	reader := bytes.NewReader(rdbData)
 
-	// Generate S3 key
+	// Generate S3 key using fixed backup ID
 	timestamp := time.Now().Format("20060102-150405")
-	s3Key := fmt.Sprintf("redis-backups/%s/dump-%s.rdb", s.ReplID, timestamp)
+	s3Key := fmt.Sprintf("redis-backups/%s/dump-%s.rdb", s.backupID, timestamp)
 
 	// Metadata for the backup
 	metadata := map[string]string{
 		"uploaded-by":        "redis-operator",
 		"timestamp":          fmt.Sprintf("%d", time.Now().Unix()),
-		"replication-id":     s.ReplID,
+		"replication-id":     s.backupID,
 		"replication-offset": fmt.Sprintf("%d", s.replOffset),
 		"backup-type":        "rdb",
 	}
@@ -224,7 +231,7 @@ func (s *BackupService) streamRDBToS3() error {
 		}
 	}
 
-	err = s.backupManager.UploadWithProgressAndRetention(ctx, reader, s3Key, metadata, s.ReplID, s.retentionCount, progressCallback)
+	err = s.backupManager.UploadWithProgressAndRetention(ctx, reader, s3Key, metadata, s.backupID, s.retentionCount, progressCallback)
 	if err != nil {
 		return fmt.Errorf("failed to upload RDB to S3: %v", err)
 	}
@@ -243,15 +250,15 @@ func (s *BackupService) streamCommandsToS3(ctx context.Context) error {
 	// Create a pipe for streaming commands
 	reader, writer := io.Pipe()
 
-	// Generate S3 key
+	// Generate S3 key using fixed backup ID
 	timestamp := time.Now().Format("20060102-150405")
-	s3Key := fmt.Sprintf("redis-backups/%s/appendonly-%s.aof", s.ReplID, timestamp)
+	s3Key := fmt.Sprintf("redis-backups/%s/appendonly-%s.aof", s.backupID, timestamp)
 
 	// Metadata for the backup
 	metadata := map[string]string{
 		"uploaded-by":        "redis-operator",
 		"timestamp":          fmt.Sprintf("%d", time.Now().Unix()),
-		"replication-id":     s.ReplID,
+		"replication-id":     s.backupID,
 		"replication-offset": fmt.Sprintf("%d", s.replOffset),
 		"backup-type":        "aof",
 	}
@@ -430,37 +437,6 @@ func (s *BackupService) gracefulReconnect() error {
 	return nil
 }
 
-// isValidTimestamp checks if a timestamp string matches the expected format: YYYYMMDD-HHMMSS
-func isValidTimestamp(timestamp string) bool {
-	// Expected format: 20240101-120000
-	if len(timestamp) != 15 {
-		return false
-	}
-
-	// Check for dash in the right position
-	if timestamp[8] != '-' {
-		return false
-	}
-
-	// Check if the date and time parts are numeric
-	datePart := timestamp[:8] // YYYYMMDD
-	timePart := timestamp[9:] // HHMMSS
-
-	for _, r := range datePart {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-
-	for _, r := range timePart {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-
-	return true
-}
-
 // Helper functions for environment variables
 func getEnvOrDefault(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
@@ -490,7 +466,7 @@ func (s *BackupService) uploadStreamToS3(reader io.Reader, s3Key string, metadat
 		}
 	}
 
-	err := s.backupManager.UploadWithProgressAndRetention(ctx, reader, s3Key, metadata, s.ReplID, s.retentionCount, progressCallback)
+	err := s.backupManager.UploadWithProgressAndRetention(ctx, reader, s3Key, metadata, s.backupID, s.retentionCount, progressCallback)
 	if err != nil {
 		uploadComplete <- fmt.Errorf("failed to upload AOF to S3: %v", err)
 		return
