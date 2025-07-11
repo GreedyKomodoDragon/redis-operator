@@ -39,6 +39,10 @@ func BuildRedisContainer(redis *koncachev1alpha1.Redis, port int32) corev1.Conta
 		ImagePullPolicy: redis.Spec.ImagePullPolicy,
 		Ports:           containerPorts,
 		Resources:       redis.Spec.Resources,
+		SecurityContext: &corev1.SecurityContext{
+			RunAsUser:  &[]int64{999}[0],
+			RunAsGroup: &[]int64{999}[0],
+		},
 		VolumeMounts: []corev1.VolumeMount{
 			{
 				Name:      RedisDataVolumeName,
@@ -399,6 +403,10 @@ func BuildBackupInitContainer(redis *koncachev1alpha1.Redis) corev1.Container {
 		if redis.Spec.Backup.Storage.S3.SecretName != "" {
 			envVars = append(envVars, []corev1.EnvVar{
 				{
+					Name:  "DATA_DIR",
+					Value: "/data", // Ensure data directory is set for init container
+				},
+				{
 					Name: "AWS_ACCESS_KEY_ID",
 					ValueFrom: &corev1.EnvVarSource{
 						SecretKeyRef: &corev1.SecretKeySelector{
@@ -448,6 +456,10 @@ func BuildBackupInitContainer(redis *koncachev1alpha1.Redis) corev1.Container {
 		ImagePullPolicy: redis.Spec.ImagePullPolicy,
 		Command:         []string{"/init-backup"}, // Use the init-backup entrypoint
 		Env:             envVars,
+		SecurityContext: &corev1.SecurityContext{
+			RunAsUser:  &[]int64{999}[0], // Run as Redis user to have write permissions to /data
+			RunAsGroup: &[]int64{999}[0], // Run as Redis group
+		},
 		VolumeMounts: []corev1.VolumeMount{
 			{
 				Name:      "redis-data",

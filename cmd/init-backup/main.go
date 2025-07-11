@@ -13,6 +13,12 @@ func main() {
 		Level: slog.LevelInfo,
 	}))
 
+	// Get data directory from environment variable or use default
+	dataDir := os.Getenv("DATA_DIR")
+	if dataDir == "" {
+		dataDir = "/data" // Default Redis data directory
+	}
+
 	// Create S3 object store
 	objectStore, err := initbackup.NewS3Store(logger)
 	if err != nil {
@@ -23,7 +29,7 @@ func main() {
 
 	// Create and run the service
 	service := initbackup.NewService(objectStore)
-	if err := service.Run(); err != nil {
+	if err := service.Run(dataDir); err != nil {
 		logger.Error("Service failed", "error", err)
 		os.Exit(1)
 	}

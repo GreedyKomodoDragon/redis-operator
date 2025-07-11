@@ -31,7 +31,7 @@ func TestServiceRunWithoutS3Config(t *testing.T) {
 	mockStore.SetError(true, "connection failed")
 
 	service := NewService(mockStore)
-	err := service.Run()
+	err := service.Run("/tmp/test-data")
 
 	// Should fail due to mock error
 	require.Error(t, err)
@@ -43,7 +43,7 @@ func TestServiceRunWithS3Config(t *testing.T) {
 	mockStore := NewMockObjectStore(testBucket)
 
 	service := NewService(mockStore)
-	err := service.Run()
+	err := service.Run("/tmp/test-data")
 
 	// Should succeed (no files found, but no error)
 	assert.NoError(t, err)
