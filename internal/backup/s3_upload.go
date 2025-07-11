@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -66,7 +67,7 @@ func (u *S3Uploader) UploadFile(ctx context.Context, filePath, keyPrefix string)
 		return fmt.Errorf("failed to upload file to S3: %v", err)
 	}
 
-	fmt.Printf("Successfully uploaded %s to %s\n", fileName, result.Location)
+	slog.Info("Successfully uploaded file", "fileName", fileName, "location", result.Location)
 	return nil
 }
 
