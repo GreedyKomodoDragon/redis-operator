@@ -403,10 +403,6 @@ func BuildBackupInitContainer(redis *koncachev1alpha1.Redis) corev1.Container {
 		if redis.Spec.Backup.Storage.S3.SecretName != "" {
 			envVars = append(envVars, []corev1.EnvVar{
 				{
-					Name:  "DATA_DIR",
-					Value: "/data", // Ensure data directory is set for init container
-				},
-				{
 					Name: "AWS_ACCESS_KEY_ID",
 					ValueFrom: &corev1.EnvVarSource{
 						SecretKeyRef: &corev1.SecretKeySelector{
