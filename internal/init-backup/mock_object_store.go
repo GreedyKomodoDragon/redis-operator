@@ -2,6 +2,8 @@ package initbackup
 
 import (
 	"context"
+	"io"
+	"strings"
 	"time"
 )
 
@@ -44,19 +46,21 @@ func (m *MockObjectStore) ListFiles(ctx context.Context, prefix string) ([]Objec
 
 	var matchingFiles []ObjectStoreFile
 	for _, file := range m.files {
-		if len(prefix) == 0 || hasPrefix(file.Key, prefix) {
+		if len(prefix) == 0 || strings.HasPrefix(file.Key, prefix) {
 			matchingFiles = append(matchingFiles, file)
 		}
 	}
 	return matchingFiles, nil
 }
 
-// DownloadFile implements ObjectStore.DownloadFile
-func (m *MockObjectStore) DownloadFile(ctx context.Context, key string) ([]byte, error) {
+// DownloadFileToWriter implements ObjectStore.DownloadFileToWriter
+func (m *MockObjectStore) DownloadFileToWriter(ctx context.Context, key string, writer io.Writer) error {
 	if m.shouldError {
-		return nil, &mockError{message: m.errorMessage}
+		return &mockError{message: m.errorMessage}
 	}
-	return []byte("mock file content"), nil
+
+	_, err := writer.Write([]byte("mock file content"))
+	return err
 }
 
 // GetBucketName implements ObjectStore.GetBucketName
@@ -76,9 +80,4 @@ type mockError struct {
 
 func (e *mockError) Error() string {
 	return e.message
-}
-
-// hasPrefix checks if a string has a given prefix (helper function)
-func hasPrefix(s, prefix string) bool {
-	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
 }

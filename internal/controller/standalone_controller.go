@@ -632,6 +632,16 @@ func (s *StandaloneController) hasContainerChanges(existing, desired *appsv1.Sta
 		}
 	}
 
+	// Check init containers
+	if s.hasInitContainerChanges(existing, desired) {
+		return true
+	}
+
+	// Check SecurityContext
+	if s.hasSecurityContextChanges(existing, desired) {
+		return true
+	}
+
 	return false
 }
 
@@ -639,7 +649,8 @@ func (s *StandaloneController) hasContainerChanges(existing, desired *appsv1.Sta
 func (s *StandaloneController) hasContainerSpecChanges(existing, desired *corev1.Container) bool {
 	return existing.Image != desired.Image || // Check image
 		s.hasResourceChanges(existing, desired) || // Check resources
-		s.hasPortChanges(existing, desired) // Check ports
+		s.hasPortChanges(existing, desired) || // Check ports
+		s.hasEnvChanges(existing, desired) // Check environment variables
 }
 
 // hasResourceChanges checks if container resources have changed
@@ -781,4 +792,102 @@ func (s *StandaloneController) hasVolumeClaimTemplateChanges(existing, desired *
 	}
 
 	return false
+}
+
+// hasInitContainerChanges checks if init containers have changed
+func (s *StandaloneController) hasInitContainerChanges(existing, desired *appsv1.StatefulSet) bool {
+	log := logf.Log.WithValues("statefulset", existing.Name)
+
+	existingInitContainers := existing.Spec.Template.Spec.InitContainers
+	desiredInitContainers := desired.Spec.Template.Spec.InitContainers
+
+	if len(existingInitContainers) != len(desiredInitContainers) {
+		log.V(1).Info("Init container count changed",
+			"existing_count", len(existingInitContainers),
+			"desired_count", len(desiredInitContainers))
+		return true
+	}
+
+	for i, existingInitContainer := range existingInitContainers {
+		if i >= len(desiredInitContainers) {
+			return true
+		}
+		desiredInitContainer := desiredInitContainers[i]
+
+		if s.hasContainerSpecChanges(&existingInitContainer, &desiredInitContainer) {
+			log.V(1).Info("Init container spec changed",
+				"container_name", existingInitContainer.Name,
+				"existing_image", existingInitContainer.Image,
+				"desired_image", desiredInitContainer.Image)
+			return true
+		}
+	}
+
+	return false
+}
+
+// hasSecurityContextChanges checks if pod SecurityContext has changed
+func (s *StandaloneController) hasSecurityContextChanges(existing, desired *appsv1.StatefulSet) bool {
+	log := logf.Log.WithValues("statefulset", existing.Name)
+
+	existingSC := existing.Spec.Template.Spec.SecurityContext
+	desiredSC := desired.Spec.Template.Spec.SecurityContext
+
+	// Both nil
+	if existingSC == nil && desiredSC == nil {
+		return false
+	}
+
+	// One nil, one not
+	if (existingSC == nil) != (desiredSC == nil) {
+		log.V(1).Info("SecurityContext nil state changed",
+			"existing_nil", existingSC == nil,
+			"desired_nil", desiredSC == nil)
+		return true
+	}
+
+	// Both not nil, compare fields
+	if existingSC.RunAsUser != nil && desiredSC.RunAsUser != nil {
+		if *existingSC.RunAsUser != *desiredSC.RunAsUser {
+			log.V(1).Info("RunAsUser changed",
+				"existing", *existingSC.RunAsUser,
+				"desired", *desiredSC.RunAsUser)
+			return true
+		}
+	} else if (existingSC.RunAsUser == nil) != (desiredSC.RunAsUser == nil) {
+		return true
+	}
+
+	if existingSC.RunAsGroup != nil && desiredSC.RunAsGroup != nil {
+		if *existingSC.RunAsGroup != *desiredSC.RunAsGroup {
+			log.V(1).Info("RunAsGroup changed",
+				"existing", *existingSC.RunAsGroup,
+				"desired", *desiredSC.RunAsGroup)
+			return true
+		}
+	} else if (existingSC.RunAsGroup == nil) != (desiredSC.RunAsGroup == nil) {
+		return true
+	}
+
+	return false
+}
+
+// hasEnvChanges checks if container environment variables have changed
+func (s *StandaloneController) hasEnvChanges(existing, desired *corev1.Container) bool {
+	if len(existing.Env) != len(desired.Env) {
+		return true
+	}
+
+	// Create maps for easier comparison
+	existingEnvMap := make(map[string]string)
+	for _, env := range existing.Env {
+		existingEnvMap[env.Name] = env.Value
+	}
+
+	desiredEnvMap := make(map[string]string)
+	for _, env := range desired.Env {
+		desiredEnvMap[env.Name] = env.Value
+	}
+
+	return !EqualStringMaps(existingEnvMap, desiredEnvMap)
 }

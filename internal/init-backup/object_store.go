@@ -2,6 +2,7 @@ package initbackup
 
 import (
 	"context"
+	"io"
 	"time"
 )
 
@@ -17,9 +18,8 @@ type ObjectStore interface {
 	// ListFiles lists all files in the object store with the given prefix
 	ListFiles(ctx context.Context, prefix string) ([]ObjectStoreFile, error)
 
-	// DownloadFile downloads a file from the object store
-	// This method is not implemented yet but will be needed for restore functionality
-	DownloadFile(ctx context.Context, key string) ([]byte, error)
+	// DownloadFileToWriter streams a file from the object store to a writer (more memory efficient)
+	DownloadFileToWriter(ctx context.Context, key string, writer io.Writer) error
 
 	// GetBucketName returns the bucket name for logging purposes
 	GetBucketName() string

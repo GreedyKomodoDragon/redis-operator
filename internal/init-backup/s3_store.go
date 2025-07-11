@@ -3,6 +3,7 @@ package initbackup
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"time"
@@ -118,10 +119,28 @@ func (s *S3Store) ListFiles(ctx context.Context, prefix string) ([]ObjectStoreFi
 	return files, nil
 }
 
-// DownloadFile implements ObjectStore.DownloadFile
-func (s *S3Store) DownloadFile(ctx context.Context, key string) ([]byte, error) {
-	// TODO: Implement download functionality for future restore feature
-	return nil, fmt.Errorf("download functionality not implemented yet")
+// DownloadFileToWriter implements ObjectStore.DownloadFileToWriter
+func (s *S3Store) DownloadFileToWriter(ctx context.Context, key string, writer io.Writer) error {
+	s.logger.Debug("Streaming download from S3", "key", key, "bucket", s.bucket)
+
+	input := &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	}
+
+	result, err := s.client.GetObject(ctx, input)
+	if err != nil {
+		return fmt.Errorf("failed to download file %s: %v", key, err)
+	}
+	defer result.Body.Close()
+
+	bytesWritten, err := io.Copy(writer, result.Body)
+	if err != nil {
+		return fmt.Errorf("failed to stream file content %s: %v", key, err)
+	}
+
+	s.logger.Info("Successfully streamed file", "key", key, "bytes_written", bytesWritten)
+	return nil
 }
 
 // GetBucketName implements ObjectStore.GetBucketName

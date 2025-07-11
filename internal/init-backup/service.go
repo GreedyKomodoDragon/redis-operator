@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -48,8 +49,12 @@ func NewService(objectStore ObjectStore) *Service {
 	}
 }
 
-func (s *Service) Run() error {
-	s.logger.Info("Starting init-backup service")
+func (s *Service) Run(dataDir string) error {
+	if dataDir == "" {
+		dataDir = "/data" // Default Redis data directory
+	}
+
+	s.logger.Info("Starting init-backup service", "data_dir", dataDir)
 
 	// Fetch the latest backup set (RDB + matching AOF files)
 	backupSet, err := s.fetchLatestBackupSet()
@@ -80,9 +85,13 @@ func (s *Service) Run() error {
 		)
 	}
 
-	// For now, we only discover the latest RDB file
-	// Future implementation will download and restore the RDB file
-	s.logger.Info("RDB file discovery completed successfully")
+	// Download and restore the backup files
+	if err := s.restoreBackupSet(backupSet, dataDir); err != nil {
+		s.logger.Error("Failed to restore backup set", "error", err)
+		return err
+	}
+
+	s.logger.Info("Backup restoration completed successfully")
 	return nil
 }
 
@@ -235,4 +244,138 @@ func (s *Service) findMatchingAOFFiles(rdbFile *RDBFile, aofFiles []AOFFile) []A
 	)
 
 	return matchingAOFs
+}
+
+// restoreBackupSet downloads and restores the RDB and AOF files from the backup set
+func (s *Service) restoreBackupSet(backupSet *BackupSet, dataDir string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	s.logger.Info("Starting backup restoration", "data_dir", dataDir)
+
+	// Ensure data directory exists
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return fmt.Errorf("failed to create data directory %s: %v", dataDir, err)
+	}
+
+	// Clean up any existing Redis data files to avoid permission issues
+	s.cleanupExistingRedisFiles(dataDir)
+
+	// Download and restore RDB file
+	if err := s.downloadAndSaveRDBFile(ctx, backupSet.RDBFile, dataDir); err != nil {
+		return fmt.Errorf("failed to restore RDB file: %v", err)
+	}
+
+	// Download and restore AOF files
+	if len(backupSet.AOFFiles) > 0 {
+		if err := s.downloadAndSaveAOFFiles(ctx, backupSet.AOFFiles, dataDir); err != nil {
+			return fmt.Errorf("failed to restore AOF files: %v", err)
+		}
+	} else {
+		s.logger.Info("No AOF files to restore")
+	}
+
+	return nil
+}
+
+// downloadAndSaveRDBFile downloads the RDB file and saves it as dump.rdb
+func (s *Service) downloadAndSaveRDBFile(ctx context.Context, rdbFile *RDBFile, dataDir string) error {
+	s.logger.Info("Downloading RDB file", "key", rdbFile.Key, "size", rdbFile.Size)
+
+	// Save as dump.rdb (Redis default name)
+	rdbPath := filepath.Join(dataDir, "dump.rdb")
+
+	// Create the file
+	file, err := os.Create(rdbPath)
+	if err != nil {
+		return fmt.Errorf("failed to create RDB file %s: %v", rdbPath, err)
+	}
+	defer file.Close()
+
+	// Stream the file directly to disk for memory efficiency
+	if err := s.objectStore.DownloadFileToWriter(ctx, rdbFile.Key, file); err != nil {
+		return fmt.Errorf("failed to download RDB file %s: %v", rdbFile.Key, err)
+	}
+
+	// Get file info for verification
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to get file info for %s: %v", rdbPath, err)
+	}
+
+	s.logger.Info("RDB file restored successfully",
+		"path", rdbPath,
+		"size", fileInfo.Size(),
+		"original_key", rdbFile.Key)
+
+	return nil
+}
+
+// downloadAndSaveAOFFiles downloads AOF files and saves them appropriately
+func (s *Service) downloadAndSaveAOFFiles(ctx context.Context, aofFiles []AOFFile, dataDir string) error {
+	s.logger.Info("Downloading AOF files", "count", len(aofFiles))
+
+	for i, aofFile := range aofFiles {
+		s.logger.Info("Downloading AOF file", "index", i+1, "total", len(aofFiles), "key", aofFile.Key)
+
+		// Create the AOF file
+		var aofPath string
+		if len(aofFiles) == 1 {
+			aofPath = filepath.Join(dataDir, "appendonly.aof")
+		} else {
+			// For multiple AOF files, use appendonly.aof.1, appendonly.aof.2, etc.
+			aofPath = filepath.Join(dataDir, fmt.Sprintf("appendonly.aof.%d", i+1))
+		}
+
+		// Remove existing file if it exists to avoid permission issues
+		if err := os.Remove(aofPath); err != nil && !os.IsNotExist(err) {
+			s.logger.Debug("Failed to remove existing AOF file", "path", aofPath, "error", err)
+			// Continue anyway, as os.Create might still work
+		}
+
+		file, err := os.Create(aofPath)
+		if err != nil {
+			return fmt.Errorf("failed to create AOF file %s: %v", aofPath, err)
+		}
+
+		// Stream the file directly to disk for memory efficiency
+		if err := s.objectStore.DownloadFileToWriter(ctx, aofFile.Key, file); err != nil {
+			file.Close()
+			return fmt.Errorf("failed to download AOF file %s: %v", aofFile.Key, err)
+		}
+
+		// Get file info for verification
+		fileInfo, err := file.Stat()
+		file.Close()
+		if err != nil {
+			return fmt.Errorf("failed to get file info for %s: %v", aofPath, err)
+		}
+
+		s.logger.Info("AOF file restored successfully",
+			"path", aofPath,
+			"size", fileInfo.Size(),
+			"original_key", aofFile.Key)
+	}
+
+	return nil
+}
+
+// cleanupExistingRedisFiles removes existing Redis data files that might have permission issues
+func (s *Service) cleanupExistingRedisFiles(dataDir string) {
+	// List of files and directories to clean up
+	cleanupPaths := []string{
+		filepath.Join(dataDir, "dump.rdb"),
+		filepath.Join(dataDir, "appendonly.aof"),
+		filepath.Join(dataDir, "appendonlydir"),
+	}
+
+	for _, path := range cleanupPaths {
+		if err := os.RemoveAll(path); err != nil && !os.IsNotExist(err) {
+			s.logger.Debug("Failed to remove existing Redis file/directory",
+				"path", path, "error", err)
+			// Continue anyway - we'll try to overwrite
+		} else if err == nil {
+			s.logger.Debug("Removed existing Redis file/directory", "path", path)
+		}
+	}
 }
