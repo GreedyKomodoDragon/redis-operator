@@ -7,5 +7,4 @@ resources:
 - redis-standalone-monitoring.yaml
 - redis-standalone-security.yaml
 - redis-cluster-example.yaml
-- redis-sentinel-example.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

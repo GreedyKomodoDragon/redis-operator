@@ -28,9 +28,9 @@ import (
 
 // RedisSpec defines the desired state of Redis.
 type RedisSpec struct {
-	// Mode specifies the Redis deployment mode (standalone, cluster, sentinel)
+	// Mode specifies the Redis deployment mode (standalone, cluster)
 	// +kubebuilder:default="standalone"
-	// +kubebuilder:validation:Enum=standalone;cluster;sentinel
+	// +kubebuilder:validation:Enum=standalone;cluster
 	Mode RedisMode `json:"mode,omitempty"`
 
 	// Version specifies the Redis version to deploy
@@ -63,9 +63,6 @@ type RedisSpec struct {
 
 	// Cluster specifies cluster-specific configuration (only for cluster mode)
 	Cluster *RedisCluster `json:"cluster,omitempty"`
-
-	// Sentinel specifies sentinel-specific configuration (only for sentinel mode)
-	Sentinel *RedisSentinel `json:"sentinel,omitempty"`
 
 	// Security specifies security-related configuration
 	Security RedisSecurity `json:"security,omitempty"`
@@ -181,9 +178,6 @@ const (
 
 	// RedisModeCluster indicates a Redis cluster
 	RedisModeCluster RedisMode = "cluster"
-
-	// RedisModeSentinel indicates Redis with Sentinel
-	RedisModeSentinel RedisMode = "sentinel"
 )
 
 // RedisCluster defines cluster-specific configuration
@@ -227,45 +221,6 @@ type RedisCluster struct {
 
 	// PodDisruptionBudget specifies PDB configuration for cluster
 	PodDisruptionBudget *RedisPodDisruptionBudget `json:"podDisruptionBudget,omitempty"`
-}
-
-// RedisSentinel defines sentinel-specific configuration
-type RedisSentinel struct {
-	// Replicas specifies the number of sentinel instances
-	// +kubebuilder:default=3
-	// +kubebuilder:validation:Minimum=3
-	Replicas int32 `json:"replicas,omitempty"`
-
-	// Port specifies the sentinel port
-	// +kubebuilder:default=26379
-	Port int32 `json:"port,omitempty"`
-
-	// MasterName specifies the name of the master being monitored
-	// +kubebuilder:default="mymaster"
-	MasterName string `json:"masterName,omitempty"`
-
-	// Quorum specifies the number of sentinels required for failover
-	// +kubebuilder:default=2
-	Quorum int32 `json:"quorum,omitempty"`
-
-	// DownAfterMilliseconds specifies after how many milliseconds a master is considered down
-	// +kubebuilder:default=30000
-	DownAfterMilliseconds int32 `json:"downAfterMilliseconds,omitempty"`
-
-	// FailoverTimeout specifies the failover timeout in milliseconds
-	// +kubebuilder:default=180000
-	FailoverTimeout int32 `json:"failoverTimeout,omitempty"`
-
-	// ParallelSyncs specifies how many slaves can be reconfigured in parallel
-	// +kubebuilder:default=1
-	ParallelSyncs int32 `json:"parallelSyncs,omitempty"`
-
-	// Resources specifies resource requirements for sentinel containers
-	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
-
-	// AntiAffinity enables pod anti-affinity for sentinel instances
-	// +kubebuilder:default=true
-	AntiAffinity *bool `json:"antiAffinity,omitempty"`
 }
 
 // RedisHighAvailability defines high availability configuration

@@ -2520,11 +2520,10 @@ spec:
               mode:
                 default: standalone
                 description: Mode specifies the Redis deployment mode (standalone,
-                  cluster, sentinel)
+                  cluster)
                 enum:
                 - standalone
                 - cluster
-                - sentinel
                 type: string
               monitoring:
                 description: Monitoring specifies monitoring configuration
@@ -3572,116 +3571,6 @@ spec:
                         type: string
                     required:
                     - enabled
-                    type: object
-                type: object
-              sentinel:
-                description: Sentinel specifies sentinel-specific configuration (only
-                  for sentinel mode)
-                properties:
-                  antiAffinity:
-                    default: true
-                    description: AntiAffinity enables pod anti-affinity for sentinel
-                      instances
-                    type: boolean
-                  downAfterMilliseconds:
-                    default: 30000
-                    description: DownAfterMilliseconds specifies after how many milliseconds
-                      a master is considered down
-                    format: int32
-                    type: integer
-                  failoverTimeout:
-                    default: 180000
-                    description: FailoverTimeout specifies the failover timeout in
-                      milliseconds
-                    format: int32
-                    type: integer
-                  masterName:
-                    default: mymaster
-                    description: MasterName specifies the name of the master being
-                      monitored
-                    type: string
-                  parallelSyncs:
-                    default: 1
-                    description: ParallelSyncs specifies how many slaves can be reconfigured
-                      in parallel
-                    format: int32
-                    type: integer
-                  port:
-                    default: 26379
-                    description: Port specifies the sentinel port
-                    format: int32
-                    type: integer
-                  quorum:
-                    default: 2
-                    description: Quorum specifies the number of sentinels required
-                      for failover
-                    format: int32
-                    type: integer
-                  replicas:
-                    default: 3
-                    description: Replicas specifies the number of sentinel instances
-                    format: int32
-                    minimum: 3
-                    type: integer
-                  resources:
-                    description: Resources specifies resource requirements for sentinel
-                      containers
-                    properties:
-                      claims:
-                        description: |-
-                          Claims lists the names of resources, defined in spec.resourceClaims,
-                          that are used by this container.
-
-                          This is an alpha field and requires enabling the
-                          DynamicResourceAllocation feature gate.
-
-                          This field is immutable. It can only be set for containers.
-                        items:
-                          description: ResourceClaim references one entry in PodSpec.ResourceClaims.
-                          properties:
-                            name:
-                              description: |-
-                                Name must match the name of one entry in pod.spec.resourceClaims of
-                                the Pod where this field is used. It makes that resource available
-                                inside a container.
-                              type: string
-                            request:
-                              description: |-
-                                Request is the name chosen for a request in the referenced claim.
-                                If empty, everything from the claim is made available, otherwise
-                                only the result of this request.
-                              type: string
-                          required:
-                          - name
-                          type: object
-                        type: array
-                        x-kubernetes-list-map-keys:
-                        - name
-                        x-kubernetes-list-type: map
-                      limits:
-                        additionalProperties:
-                          anyOf:
-                          - type: integer
-                          - type: string
-                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                          x-kubernetes-int-or-string: true
-                        description: |-
-                          Limits describes the maximum amount of compute resources allowed.
-                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
-                        type: object
-                      requests:
-                        additionalProperties:
-                          anyOf:
-                          - type: integer
-                          - type: string
-                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                          x-kubernetes-int-or-string: true
-                        description: |-
-                          Requests describes the minimum amount of compute resources required.
-                          If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
-                          otherwise to an implementation-defined value. Requests cannot exceed Limits.
-                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
-                        type: object
                     type: object
                 type: object
               serviceAccount:

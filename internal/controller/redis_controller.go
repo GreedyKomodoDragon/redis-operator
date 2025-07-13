@@ -64,14 +64,12 @@ func (r *RedisReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	case koncachev1alpha1.RedisModeStandalone, "": // Default to standalone if mode is empty
 		result, err := r.standaloneController.Reconcile(ctx, redis)
 		// Add a small requeue delay for stable resources to reduce reconciliation frequency
-		if err == nil && !result.Requeue && result.RequeueAfter == 0 {
+		if err == nil && result.RequeueAfter == 0 {
 			result.RequeueAfter = 30 * time.Second
 		}
 		return result, err
 	case koncachev1alpha1.RedisModeCluster:
 		return r.reconcileCluster(ctx, redis)
-	case koncachev1alpha1.RedisModeSentinel:
-		return r.reconcileSentinel(ctx, redis)
 	default:
 		log.Error(fmt.Errorf("unsupported Redis mode: %s", redis.Spec.Mode), "Invalid Redis mode")
 		return ctrl.Result{}, fmt.Errorf("unsupported Redis mode: %s", redis.Spec.Mode)
@@ -83,14 +81,6 @@ func (r *RedisReconciler) reconcileCluster(ctx context.Context, redis *koncachev
 	log := logf.FromContext(ctx)
 	log.Info("Cluster mode reconciliation not yet implemented")
 	// TODO: Implement cluster mode reconciliation
-	return ctrl.Result{}, nil
-}
-
-// reconcileSentinel handles the reconciliation of a Redis with Sentinel
-func (r *RedisReconciler) reconcileSentinel(ctx context.Context, redis *koncachev1alpha1.Redis) (ctrl.Result, error) {
-	log := logf.FromContext(ctx)
-	log.Info("Sentinel mode reconciliation not yet implemented")
-	// TODO: Implement sentinel mode reconciliation
 	return ctrl.Result{}, nil
 }
 
