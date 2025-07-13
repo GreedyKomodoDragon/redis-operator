@@ -36,7 +36,13 @@ func BuildRedisConfig(redis *koncachev1alpha1.Redis) string {
 	// Network configuration
 	config += fmt.Sprintf("timeout %d\n", redis.Spec.Config.Timeout)
 	config += fmt.Sprintf("tcp-keepalive %d\n", redis.Spec.Config.TCPKeepAlive)
-	config += fmt.Sprintf("databases %d\n", redis.Spec.Config.Databases)
+
+	// Databases configuration - use default value of 16 if not specified or 0
+	databases := redis.Spec.Config.Databases
+	if databases <= 0 {
+		databases = 16
+	}
+	config += fmt.Sprintf("databases %d\n", databases)
 
 	// Logging
 	if redis.Spec.Config.LogLevel != "" {
