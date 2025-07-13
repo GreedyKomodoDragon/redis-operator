@@ -95,7 +95,7 @@ func (s *StandaloneController) Reconcile(ctx context.Context, redis *koncachev1a
 	// Create or update StatefulSet
 	configHash := ComputeStringHash(redisConfig)
 	log.V(1).Info("Generated Redis config", "hash", configHash, "config_length", len(redisConfig))
-	statefulSet, requeue, err := s.reconcileStatefulSet(ctx, redis, redisConfig, configHash)
+	statefulSets, requeue, err := s.reconcileStatefulSets(ctx, redis, redisConfig, configHash)
 	if err != nil {
 		log.Error(err, "Failed to reconcile StatefulSet")
 		return ctrl.Result{}, err
@@ -107,7 +107,7 @@ func (s *StandaloneController) Reconcile(ctx context.Context, redis *koncachev1a
 	}
 
 	// Update the Redis status
-	if err := s.updateRedisStatus(ctx, redis, statefulSet); err != nil {
+	if err := s.updateRedisStatus(ctx, redis, statefulSets); err != nil {
 		log.Error(err, "Failed to update Redis status")
 		return ctrl.Result{}, err
 	}
@@ -229,52 +229,61 @@ func (s *StandaloneController) reconcileService(ctx context.Context, redis *konc
 	return err
 }
 
-// reconcileStatefulSet creates or updates the StatefulSet for Redis
-func (s *StandaloneController) reconcileStatefulSet(ctx context.Context, redis *koncachev1alpha1.Redis, redisConfig, configHash string) (*appsv1.StatefulSet, bool, error) {
+// reconcileStatefulSets creates or updates the StatefulSet for Redis
+func (s *StandaloneController) reconcileStatefulSets(ctx context.Context, redis *koncachev1alpha1.Redis, redisConfig, configHash string) ([]*appsv1.StatefulSet, bool, error) {
 	log := logf.FromContext(ctx)
 
-	statefulSet := s.statefulSetForRedis(redis, redisConfig, configHash)
-	if err := controllerutil.SetControllerReference(redis, statefulSet, s.Scheme); err != nil {
-		return nil, false, err
-	}
+	statefulSets := s.statefulsSetForRedis(redis, redisConfig, configHash)
+	foundStatefulSets := make([]*appsv1.StatefulSet, 0, len(statefulSets))
 
-	foundStatefulSet := &appsv1.StatefulSet{}
-	err := s.Get(ctx, types.NamespacedName{Name: statefulSet.Name, Namespace: statefulSet.Namespace}, foundStatefulSet)
-	if err != nil && errors.IsNotFound(err) {
-		log.Info("Creating a new StatefulSet", statefulSetNamespaceField, statefulSet.Namespace, statefulSetNameField, statefulSet.Name)
-		err = s.Create(ctx, statefulSet)
-		if err != nil {
+	for _, statefulSet := range statefulSets {
+		if err := controllerutil.SetControllerReference(redis, statefulSet, s.Scheme); err != nil {
 			return nil, false, err
 		}
-		// StatefulSet created successfully - return the created statefulSet and requeue
-		return statefulSet, true, nil
-	} else if err != nil {
-		return nil, false, err
+
+		foundStatefulSet := &appsv1.StatefulSet{}
+		err := s.Get(ctx, types.NamespacedName{Name: statefulSet.Name, Namespace: statefulSet.Namespace}, foundStatefulSet)
+		if err != nil && errors.IsNotFound(err) {
+			log.Info("Creating a new StatefulSet", statefulSetNamespaceField, statefulSet.Namespace, statefulSetNameField, statefulSet.Name)
+			err = s.Create(ctx, statefulSet)
+			if err != nil {
+				return nil, false, err
+			}
+			// StatefulSet created successfully - return the created statefulSet and requeue
+			return statefulSets, true, nil
+		} else if err != nil {
+			return nil, false, err
+		}
+
+		needsUpdate := s.needsStatefulSetUpdate(foundStatefulSet, statefulSet)
+		log.V(1).Info("StatefulSet update check completed",
+			statefulSetNameField, foundStatefulSet.Name,
+			"needs_update", needsUpdate)
+
+		if !needsUpdate {
+			log.V(1).Info("StatefulSet is up-to-date, no changes needed", statefulSetNameField, foundStatefulSet.Name)
+			// No changes needed, return the existing StatefulSet and do not requeue
+			foundStatefulSets = append(foundStatefulSets, foundStatefulSet)
+			continue
+		}
+
+		log.Info("StatefulSet spec has changed, updating", statefulSetNameField, foundStatefulSet.Name)
+
+		// Update the existing StatefulSet with the new spec
+		foundStatefulSet.Spec = statefulSet.Spec
+		foundStatefulSet.Labels = statefulSet.Labels
+		foundStatefulSet.Annotations = statefulSet.Annotations
+
+		if err := s.Update(ctx, foundStatefulSet); err != nil {
+			return nil, false, err
+		}
+
+		log.Info("StatefulSet updated successfully", statefulSetNameField, foundStatefulSet.Name)
+		foundStatefulSets = append(foundStatefulSets, foundStatefulSet)
 	}
 
-	needsUpdate := s.needsStatefulSetUpdate(foundStatefulSet, statefulSet)
-	log.V(1).Info("StatefulSet update check completed",
-		statefulSetNameField, foundStatefulSet.Name,
-		"needs_update", needsUpdate)
-
-	if !needsUpdate {
-		log.V(1).Info("StatefulSet is up-to-date, no changes needed", statefulSetNameField, foundStatefulSet.Name)
-		// No changes needed, return the existing StatefulSet and do not requeue
-		return foundStatefulSet, false, nil
-	}
-
-	log.Info("StatefulSet spec has changed, updating", statefulSetNameField, foundStatefulSet.Name)
-
-	// Update the existing StatefulSet with the new spec
-	foundStatefulSet.Spec = statefulSet.Spec
-	foundStatefulSet.Labels = statefulSet.Labels
-	foundStatefulSet.Annotations = statefulSet.Annotations
-
-	if err := s.Update(ctx, foundStatefulSet); err != nil {
-		return nil, false, err
-	}
 	// Return true to requeue and wait for the update to be processed
-	return foundStatefulSet, true, nil
+	return foundStatefulSets, true, nil
 
 }
 
@@ -357,8 +366,8 @@ func (s *StandaloneController) serviceForRedis(redis *koncachev1alpha1.Redis) *c
 	}
 }
 
-// statefulSetForRedis returns a StatefulSet object for Redis
-func (s *StandaloneController) statefulSetForRedis(redis *koncachev1alpha1.Redis, redisConfig, configHash string) *appsv1.StatefulSet {
+// statefulsSetForRedis returns a StatefulSet object for Redis
+func (s *StandaloneController) statefulsSetForRedis(redis *koncachev1alpha1.Redis, redisConfig, configHash string) []*appsv1.StatefulSet {
 	labels := LabelsForRedis(redis.Name)
 	replicas := int32(1) // Standalone Redis always has 1 replica
 	port := GetRedisPort(redis)
@@ -415,44 +424,88 @@ func (s *StandaloneController) statefulSetForRedis(redis *koncachev1alpha1.Redis
 	// Build volume claim template
 	volumeClaimTemplate := BuildVolumeClaimTemplate(redis)
 
-	return &appsv1.StatefulSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      redis.Name,
-			Namespace: redis.Namespace,
-			Labels:    labels,
-		},
-		Spec: appsv1.StatefulSetSpec{
-			Replicas:             &replicas,
-			ServiceName:          redis.Name,
-			Selector:             &metav1.LabelSelector{MatchLabels: labels},
-			Template:             podTemplate,
-			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{volumeClaimTemplate},
-			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
-				Type: appsv1.RollingUpdateStatefulSetStrategyType,
+	// Create the StatefulSet objects
+	// Note: We only create one StatefulSet for standalone Redis
+	//       but create multiple StatefulSets for HA Redis
+
+	if !redis.Spec.HighAvailability.Enabled {
+		statefulsets := make([]*appsv1.StatefulSet, 0, 1)
+		statefulsets = append(statefulsets, &appsv1.StatefulSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      redis.Name,
+				Namespace: redis.Namespace,
+				Labels:    labels,
 			},
-		},
+			Spec: appsv1.StatefulSetSpec{
+				Replicas:             &replicas,
+				ServiceName:          redis.Name,
+				Selector:             &metav1.LabelSelector{MatchLabels: labels},
+				Template:             podTemplate,
+				VolumeClaimTemplates: []corev1.PersistentVolumeClaim{volumeClaimTemplate},
+				UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
+					Type: appsv1.RollingUpdateStatefulSetStrategyType,
+				},
+			},
+		})
+
+		return statefulsets
 	}
+
+	statefulsets := make([]*appsv1.StatefulSet, 0, int(redis.Spec.HighAvailability.Replicas))
+
+	// For HA Redis, we create multiple StatefulSets
+	for i := 0; i < int(redis.Spec.HighAvailability.Replicas); i++ {
+		// if i == 0 {
+		// 	// mark the first StatefulSet as primary
+		// 	labels["app.kubernetes.io/role"] = "primary"
+		// } else {
+		// 	// mark subsequent StatefulSets as replicas
+		// 	labels["app.kubernetes.io/role"] = "replica"
+		// }
+
+		statefulsets = append(statefulsets, &appsv1.StatefulSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      redis.Name + fmt.Sprintf("-ha-%d", i+1),
+				Namespace: redis.Namespace,
+				Labels:    labels,
+			},
+			Spec: appsv1.StatefulSetSpec{
+				Replicas:             &replicas,
+				ServiceName:          redis.Name,
+				Selector:             &metav1.LabelSelector{MatchLabels: labels},
+				Template:             podTemplate,
+				VolumeClaimTemplates: []corev1.PersistentVolumeClaim{volumeClaimTemplate},
+				UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
+					Type: appsv1.RollingUpdateStatefulSetStrategyType,
+				},
+			},
+		})
+	}
+
+	return statefulsets
 }
 
 // updateRedisStatus updates the status of the Redis instance
-func (s *StandaloneController) updateRedisStatus(ctx context.Context, redis *koncachev1alpha1.Redis, statefulSet *appsv1.StatefulSet) error {
+func (s *StandaloneController) updateRedisStatus(ctx context.Context, redis *koncachev1alpha1.Redis, statefulSets []*appsv1.StatefulSet) error {
 	// Create a retry mechanism to handle conflicts
 	return s.updateStatusWithRetry(ctx, redis, func(currentRedis *koncachev1alpha1.Redis) {
-		// Update status based on StatefulSet status
-		currentRedis.Status.ObservedGeneration = currentRedis.Generation
+		for _, statefulSet := range statefulSets {
+			// Update status based on StatefulSet status
+			currentRedis.Status.ObservedGeneration = currentRedis.Generation
 
-		currentRedis.Status.Ready = statefulSet.Status.ReadyReplicas == *statefulSet.Spec.Replicas
-		if currentRedis.Status.Ready {
-			currentRedis.Status.Phase = koncachev1alpha1.RedisPhaseRunning
-		} else {
-			currentRedis.Status.Phase = koncachev1alpha1.RedisPhasePending
+			currentRedis.Status.Ready = statefulSet.Status.ReadyReplicas == *statefulSet.Spec.Replicas
+			if currentRedis.Status.Ready {
+				currentRedis.Status.Phase = koncachev1alpha1.RedisPhaseRunning
+			} else {
+				currentRedis.Status.Phase = koncachev1alpha1.RedisPhasePending
+			}
+
+			// Set endpoint
+			port := GetRedisPort(currentRedis)
+			currentRedis.Status.Endpoint = fmt.Sprintf("%s.%s.svc.cluster.local", currentRedis.Name, currentRedis.Namespace)
+			currentRedis.Status.Port = port
+			currentRedis.Status.Version = currentRedis.Spec.Version
 		}
-
-		// Set endpoint
-		port := GetRedisPort(currentRedis)
-		currentRedis.Status.Endpoint = fmt.Sprintf("%s.%s.svc.cluster.local", currentRedis.Name, currentRedis.Namespace)
-		currentRedis.Status.Port = port
-		currentRedis.Status.Version = currentRedis.Spec.Version
 	})
 }
 

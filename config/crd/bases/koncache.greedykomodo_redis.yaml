@@ -2485,6 +2485,11 @@ spec:
                         format: int32
                         type: integer
                     type: object
+                  replicas:
+                    default: 2
+                    description: Replicas specifies the replication factor for HA
+                    format: int32
+                    type: integer
                 required:
                 - enabled
                 type: object

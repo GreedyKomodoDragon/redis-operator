@@ -459,12 +459,12 @@ func TestStandaloneControllerBackupInitContainer(t *testing.T) {
 			configHash := ComputeStringHash(redisConfig)
 
 			// Create StatefulSet using the controller's method
-			statefulSet := controller.statefulSetForRedis(redis, redisConfig, configHash)
+			statefulSet := controller.statefulsSetForRedis(redis, redisConfig, configHash)
 
 			// Verify init containers
 			if tt.expectInitContainer {
-				require.Len(t, statefulSet.Spec.Template.Spec.InitContainers, 1, "StatefulSet should have one init container")
-				initContainer := statefulSet.Spec.Template.Spec.InitContainers[0]
+				require.Len(t, statefulSet[0].Spec.Template.Spec.InitContainers, 1, "StatefulSet should have one init container")
+				initContainer := statefulSet[0].Spec.Template.Spec.InitContainers[0]
 				assert.Equal(t, tt.expectedInitContainerName, initContainer.Name)
 				assert.Equal(t, []string{"/init-backup"}, initContainer.Command)
 
@@ -489,7 +489,7 @@ func TestStandaloneControllerBackupInitContainer(t *testing.T) {
 				assert.Equal(t, "test-bucket", envVarMap["S3_BUCKET"].Value)
 				assert.Equal(t, "us-west-2", envVarMap["S3_REGION"].Value)
 			} else {
-				assert.Len(t, statefulSet.Spec.Template.Spec.InitContainers, 0, "StatefulSet should have no init containers")
+				assert.Len(t, statefulSet[0].Spec.Template.Spec.InitContainers, 0, "StatefulSet should have no init containers")
 			}
 		})
 	}

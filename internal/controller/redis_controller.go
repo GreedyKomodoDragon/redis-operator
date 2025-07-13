@@ -255,7 +255,7 @@ func (r *RedisReconciler) isWaitingStateFailure(reason string) bool {
 func (r *RedisReconciler) logPodFailure(ctx context.Context, pod *corev1.Pod, redisName, reason string) {
 	log := logf.FromContext(ctx)
 
-	log.Info("🚨 REDIS POD FAILURE DETECTED 🚨",
+	log.Info("REDIS POD FAILURE DETECTED",
 		"pod", pod.Name,
 		"namespace", pod.Namespace,
 		"redis", redisName,
@@ -356,7 +356,7 @@ func (r *RedisReconciler) triggerRedisReconciliation(ctx context.Context, redis 
 		return err
 	}
 
-	log.Info("🔄 TRIGGERING REDIS FAILOVER PROCESS 🔄",
+	log.Info("TRIGGERING REDIS FAILOVER PROCESS",
 		"redis", redis.Name,
 		"namespace", redis.Namespace,
 		"timestamp", time.Now().Format(time.RFC3339))
