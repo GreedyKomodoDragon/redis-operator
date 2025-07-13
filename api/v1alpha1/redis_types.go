@@ -238,6 +238,10 @@ type RedisHighAvailability struct {
 	// BackupOnFailover enables backup before failover
 	// +kubebuilder:default=true
 	BackupOnFailover *bool `json:"backupOnFailover,omitempty"`
+
+	// Replicas specifies the replication factor for HA
+	// +kubebuilder:default=2
+	Replicas int32 `json:"replicas,omitempty"`
 }
 
 // RedisHealthCheck defines health check configuration
