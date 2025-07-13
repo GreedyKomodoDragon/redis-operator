@@ -68,30 +68,3 @@ func TestLabelsForRedisCluster(t *testing.T) {
 		})
 	}
 }
-
-func TestLabelsForRedisSentinel(t *testing.T) {
-	tests := []struct {
-		name      string
-		redisName string
-		expected  map[string]string
-	}{
-		{
-			name:      "sentinel labels",
-			redisName: "my-sentinel",
-			expected: map[string]string{
-				testAppNameLabel:              testRedisValue,
-				testAppInstanceLabel:          "my-sentinel",
-				testAppPartOfLabel:            testOperatorValue,
-				"app.kubernetes.io/component": "sentinel",
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := controller.LabelsForRedisSentinel(tt.redisName)
-
-			assert.Equal(t, tt.expected, result, "Sentinel labels should match expected values")
-		})
-	}
-}

@@ -21,13 +21,6 @@ func LabelsForRedisCluster(name string) map[string]string {
 	return labels
 }
 
-// LabelsForRedisSentinel returns the labels for selecting sentinel resources
-func LabelsForRedisSentinel(name string) map[string]string {
-	labels := LabelsForRedis(name)
-	labels["app.kubernetes.io/component"] = "sentinel"
-	return labels
-}
-
 // BuildBackupObjectMeta creates the ObjectMeta for a Redis backup pod
 func BuildBackupObjectMeta(redis *koncachev1alpha1.Redis) metav1.ObjectMeta {
 	return metav1.ObjectMeta{

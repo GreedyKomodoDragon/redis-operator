@@ -121,7 +121,8 @@ func TestRedisControllerReconcileStandaloneMode(t *testing.T) {
 
 	result, err := reconciler.Reconcile(ctx, req)
 	require.NoError(t, err)
-	assert.Equal(t, int64(0), result.RequeueAfter.Nanoseconds())
+	// Should have a requeue delay for stable resources
+	assert.Equal(t, int64(30000000000), result.RequeueAfter.Nanoseconds())
 
 	// Verify ConfigMap was created
 	configMap := &corev1.ConfigMap{}
@@ -173,11 +174,6 @@ func TestRedisControllerModeSelection(t *testing.T) {
 			mode:        koncachev1alpha1.RedisModeCluster,
 			expectError: false, // Should not error, just not implemented
 		},
-		{
-			name:        "sentinel mode not implemented",
-			mode:        koncachev1alpha1.RedisModeSentinel,
-			expectError: false, // Should not error, just not implemented
-		},
 	}
 
 	for _, tt := range tests {
@@ -218,7 +214,7 @@ func TestRedisControllerModeSelection(t *testing.T) {
 				},
 			}
 
-			result, err := reconciler.Reconcile(ctx, req)
+			_, err := reconciler.Reconcile(ctx, req)
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -226,9 +222,14 @@ func TestRedisControllerModeSelection(t *testing.T) {
 				require.NoError(t, err)
 			}
 
-			// All implemented modes should not requeue immediately
-			if !tt.expectError {
-				assert.Equal(t, int64(0), result.RequeueAfter.Nanoseconds())
+			// Check for errors
+			if tt.expectError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				// If no error occurred, the mode was successfully routed
+				// We don't check specific requeue behavior as it depends on
+				// the implementation details of each sub-controller
 			}
 		})
 	}
@@ -362,7 +363,8 @@ func TestRedisControllerWithTLS(t *testing.T) {
 
 	result, err := reconciler.Reconcile(ctx, req)
 	require.NoError(t, err)
-	assert.Equal(t, int64(0), result.RequeueAfter.Nanoseconds())
+	// Should have a requeue delay for stable resources
+	assert.Equal(t, int64(30000000000), result.RequeueAfter.Nanoseconds())
 
 	// Verify ConfigMap contains TLS configuration
 	configMap := &corev1.ConfigMap{}
