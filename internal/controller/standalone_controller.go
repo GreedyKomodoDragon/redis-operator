@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"time"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -101,7 +102,20 @@ func (s *StandaloneController) Reconcile(ctx context.Context, redis *koncachev1a
 		return ctrl.Result{}, err
 	}
 
-	// If the StatefulSet was created or updated, requeue to wait for it to be ready
+	// Clean up orphaned StatefulSets (e.g., when HA replica count is reduced)
+	if err := s.cleanupOrphanedStatefulSets(ctx, redis, statefulSets); err != nil {
+		log.Error(err, "Failed to cleanup orphaned StatefulSets")
+		// Don't fail the reconciliation, just log the error
+	}
+
+	// Still try to assign a leader if HA is enabled and StatefulSets exist
+	if redis.Spec.HighAvailability != nil && redis.Spec.HighAvailability.Enabled {
+		if err := s.ensureLeaderExists(ctx, redis); err != nil {
+			log.Error(err, "Failed to ensure leader exists during requeue")
+			// Don't fail the reconciliation for leader assignment issues
+		}
+	}
+
 	if requeue {
 		return ctrl.Result{Requeue: true}, nil
 	}
@@ -235,6 +249,7 @@ func (s *StandaloneController) reconcileStatefulSets(ctx context.Context, redis 
 
 	statefulSets := s.statefulsSetForRedis(redis, redisConfig, configHash)
 	foundStatefulSets := make([]*appsv1.StatefulSet, 0, len(statefulSets))
+	needsRequeue := false
 
 	for _, statefulSet := range statefulSets {
 		if err := controllerutil.SetControllerReference(redis, statefulSet, s.Scheme); err != nil {
@@ -249,8 +264,10 @@ func (s *StandaloneController) reconcileStatefulSets(ctx context.Context, redis 
 			if err != nil {
 				return nil, false, err
 			}
-			// StatefulSet created successfully - return the created statefulSet and requeue
-			return statefulSets, true, nil
+			// StatefulSet created successfully - mark for requeue but continue creating other StatefulSets
+			foundStatefulSets = append(foundStatefulSets, statefulSet)
+			needsRequeue = true
+			continue
 		} else if err != nil {
 			return nil, false, err
 		}
@@ -262,7 +279,7 @@ func (s *StandaloneController) reconcileStatefulSets(ctx context.Context, redis 
 
 		if !needsUpdate {
 			log.V(1).Info("StatefulSet is up-to-date, no changes needed", statefulSetNameField, foundStatefulSet.Name)
-			// No changes needed, return the existing StatefulSet and do not requeue
+			// No changes needed, add to found StatefulSets and continue
 			foundStatefulSets = append(foundStatefulSets, foundStatefulSet)
 			continue
 		}
@@ -280,11 +297,11 @@ func (s *StandaloneController) reconcileStatefulSets(ctx context.Context, redis 
 
 		log.Info("StatefulSet updated successfully", statefulSetNameField, foundStatefulSet.Name)
 		foundStatefulSets = append(foundStatefulSets, foundStatefulSet)
+		needsRequeue = true
 	}
 
-	// Return true to requeue and wait for the update to be processed
-	return foundStatefulSets, true, nil
-
+	// Return requeue status based on whether any StatefulSets were created or updated
+	return foundStatefulSets, needsRequeue, nil
 }
 
 // configMapForRedis returns a ConfigMap object for the Redis configuration
@@ -428,7 +445,7 @@ func (s *StandaloneController) statefulsSetForRedis(redis *koncachev1alpha1.Redi
 	// Note: We only create one StatefulSet for standalone Redis
 	//       but create multiple StatefulSets for HA Redis
 
-	if !redis.Spec.HighAvailability.Enabled {
+	if redis.Spec.HighAvailability == nil || !redis.Spec.HighAvailability.Enabled {
 		statefulsets := make([]*appsv1.StatefulSet, 0, 1)
 		statefulsets = append(statefulsets, &appsv1.StatefulSet{
 			ObjectMeta: metav1.ObjectMeta{
@@ -943,4 +960,163 @@ func (s *StandaloneController) hasEnvChanges(existing, desired *corev1.Container
 	}
 
 	return !EqualStringMaps(existingEnvMap, desiredEnvMap)
+}
+
+// ensureLeaderExists ensures that there's at least one leader pod in HA mode
+func (s *StandaloneController) ensureLeaderExists(ctx context.Context, redis *koncachev1alpha1.Redis) error {
+	log := logf.FromContext(ctx)
+
+	// List all pods for this Redis instance
+	podList := &corev1.PodList{}
+	listOpts := []client.ListOption{
+		client.InNamespace(redis.Namespace),
+		client.MatchingLabels{
+			"app.kubernetes.io/name":     "redis",
+			"app.kubernetes.io/instance": redis.Name,
+		},
+	}
+
+	err := s.List(ctx, podList, listOpts...)
+	if err != nil {
+		return fmt.Errorf("failed to list pods: %w", err)
+	}
+
+	// Check if there's already a leader
+	var leaderPod *corev1.Pod
+	var readyPods []*corev1.Pod
+
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+
+		// Check if this pod is the leader
+		if pod.Annotations != nil && pod.Annotations["redis-operator/role"] == "leader" {
+			leaderPod = pod
+			log.Info("Found existing leader pod", "pod", pod.Name)
+		}
+
+		// Track ready pods as potential leader candidates
+		if s.isPodReadyForLeadership(pod) {
+			readyPods = append(readyPods, pod)
+		}
+	}
+
+	// If there's already a leader, check if it's healthy
+	if leaderPod != nil {
+		if s.isPodReadyForLeadership(leaderPod) {
+			log.V(1).Info("Leader pod is healthy", "leader", leaderPod.Name)
+			return nil // Leader exists and is healthy
+		}
+		log.Info("Leader pod is not healthy, promoting new leader", "unhealthyLeader", leaderPod.Name)
+	}
+
+	// No healthy leader found, promote the first ready pod
+	if len(readyPods) == 0 {
+		log.Info("No ready pods available for leader promotion")
+		return nil // No ready pods to promote
+	}
+
+	newLeader := readyPods[0]
+	if err := s.promoteToLeader(ctx, newLeader); err != nil {
+		return fmt.Errorf("failed to promote pod to leader: %w", err)
+	}
+
+	log.Info("Successfully promoted new leader",
+		"newLeader", newLeader.Name,
+		"redis", redis.Name)
+
+	return nil
+}
+
+// isPodReadyForLeadership checks if a pod is ready to become or remain leader
+func (s *StandaloneController) isPodReadyForLeadership(pod *corev1.Pod) bool {
+	// Check pod phase
+	if pod.Status.Phase != corev1.PodRunning {
+		return false
+	}
+
+	// Check if pod is ready
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+			// Check Redis container status
+			for _, containerStatus := range pod.Status.ContainerStatuses {
+				if containerStatus.Name == "redis" {
+					return containerStatus.Ready && containerStatus.State.Running != nil
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+// promoteToLeader promotes a pod to leader by adding the appropriate annotation
+func (s *StandaloneController) promoteToLeader(ctx context.Context, pod *corev1.Pod) error {
+	if pod.Annotations == nil {
+		pod.Annotations = make(map[string]string)
+	}
+
+	pod.Annotations["redis-operator/role"] = "leader"
+	pod.Annotations["redis-operator/promoted-at"] = time.Now().Format(time.RFC3339)
+
+	return s.Update(ctx, pod)
+}
+
+// cleanupOrphanedStatefulSets removes StatefulSets that are no longer needed
+func (s *StandaloneController) cleanupOrphanedStatefulSets(ctx context.Context, redis *koncachev1alpha1.Redis, expectedStatefulSets []*appsv1.StatefulSet) error {
+	log := logf.FromContext(ctx)
+
+	// List all StatefulSets owned by this Redis instance
+	statefulSetList := &appsv1.StatefulSetList{}
+	listOpts := []client.ListOption{
+		client.InNamespace(redis.Namespace),
+		client.MatchingLabels{
+			"app.kubernetes.io/name":     "redis",
+			"app.kubernetes.io/instance": redis.Name,
+		},
+	}
+
+	err := s.List(ctx, statefulSetList, listOpts...)
+	if err != nil {
+		return fmt.Errorf("failed to list StatefulSets: %w", err)
+	}
+
+	// Create a set of expected StatefulSet names
+	expectedNames := make(map[string]bool)
+	for _, ss := range expectedStatefulSets {
+		expectedNames[ss.Name] = true
+	}
+
+	// Delete StatefulSets that are not in the expected set
+	for _, statefulSet := range statefulSetList.Items {
+		// Check if this StatefulSet is owned by our Redis instance
+		if !s.isOwnedByRedis(&statefulSet, redis) {
+			continue
+		}
+
+		if !expectedNames[statefulSet.Name] {
+			log.Info("Deleting orphaned StatefulSet",
+				statefulSetNameField, statefulSet.Name,
+				statefulSetNamespaceField, statefulSet.Namespace)
+
+			if err := s.Delete(ctx, &statefulSet); err != nil {
+				log.Error(err, "Failed to delete orphaned StatefulSet",
+					statefulSetNameField, statefulSet.Name)
+				return fmt.Errorf("failed to delete orphaned StatefulSet %s: %w", statefulSet.Name, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// isOwnedByRedis checks if a StatefulSet is owned by the specified Redis instance
+func (s *StandaloneController) isOwnedByRedis(statefulSet *appsv1.StatefulSet, redis *koncachev1alpha1.Redis) bool {
+	for _, ownerRef := range statefulSet.OwnerReferences {
+		if ownerRef.Kind == "Redis" &&
+			ownerRef.Name == redis.Name &&
+			ownerRef.APIVersion == "koncache.greedykomodo/v1alpha1" {
+			return true
+		}
+	}
+	return false
 }
