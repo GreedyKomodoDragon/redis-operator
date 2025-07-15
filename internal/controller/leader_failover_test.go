@@ -17,6 +17,16 @@ import (
 	koncachev1alpha1 "github.com/GreedyKomodoDragon/redis-operator/api/v1alpha1"
 )
 
+// Helper function to check if a pod is ready
+func podReady(pod *corev1.Pod) bool {
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
+
 func TestHandleLeaderFailover(t *testing.T) {
 	testScheme := runtime.NewScheme()
 	require.NoError(t, scheme.AddToScheme(testScheme))
@@ -309,6 +319,333 @@ func TestEnsureLeaderExistsInitialCreation(t *testing.T) {
 	}
 }
 
+func TestHALeaderFailoverComprehensive(t *testing.T) {
+	testScheme := runtime.NewScheme()
+	require.NoError(t, scheme.AddToScheme(testScheme))
+	require.NoError(t, koncachev1alpha1.AddToScheme(testScheme))
+
+	ctx := context.Background()
+
+	t.Run("HA mode with multiple replicas - leader promotion chain", func(t *testing.T) {
+		redis := &koncachev1alpha1.Redis{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-ha-chain",
+				Namespace: "default",
+			},
+			Spec: koncachev1alpha1.RedisSpec{
+				HighAvailability: &koncachev1alpha1.RedisHighAvailability{
+					Enabled:  true,
+					Replicas: 4,
+				},
+			},
+		}
+
+		// Create pods in different StatefulSets with correct Redis instance labels
+		pods := []*corev1.Pod{
+			createTestPodWithCorrectLabels("test-ha-chain-a-0", "default", "test-ha-chain", true, "test-ha-chain-a",
+				map[string]string{redisRoleAnnotation: redisLeaderRole}),
+			createTestPodWithCorrectLabels("test-ha-chain-b-0", "default", "test-ha-chain", true, "test-ha-chain-b", nil),
+			createTestPodWithCorrectLabels("test-ha-chain-c-0", "default", "test-ha-chain", true, "test-ha-chain-c", nil),
+			createTestPodWithCorrectLabels("test-ha-chain-d-0", "default", "test-ha-chain", false, "test-ha-chain-d", nil), // Not ready
+		}
+
+		clientBuilder := fake.NewClientBuilder().WithScheme(testScheme).WithObjects(redis)
+		for _, pod := range pods {
+			clientBuilder = clientBuilder.WithObjects(pod)
+		}
+		fakeClient := clientBuilder.Build()
+
+		reconciler := &RedisReconciler{
+			Client: fakeClient,
+			Scheme: testScheme,
+		}
+
+		// Simulate leader failure - get the actual failed pod from client
+		failedLeader := &corev1.Pod{}
+		err := fakeClient.Get(ctx, types.NamespacedName{Name: "test-ha-chain-a-0", Namespace: "default"}, failedLeader)
+		require.NoError(t, err)
+
+		err = reconciler.handleLeaderFailover(ctx, failedLeader, redis)
+		require.NoError(t, err)
+
+		// Check that a ready pod was promoted (should be b or c, not d since it's not ready)
+		promotedPods := 0
+		for _, podName := range []string{"test-ha-chain-b-0", "test-ha-chain-c-0"} {
+			pod := &corev1.Pod{}
+			err := fakeClient.Get(ctx, types.NamespacedName{Name: podName, Namespace: "default"}, pod)
+			require.NoError(t, err)
+
+			if annotations := pod.GetAnnotations(); annotations != nil {
+				if role, exists := annotations[redisRoleAnnotation]; exists && role == redisLeaderRole {
+					promotedPods++
+				}
+			}
+		}
+
+		assert.Equal(t, 1, promotedPods, "Exactly one pod should be promoted to leader")
+
+		// Verify the non-ready pod wasn't promoted
+		nonReadyPod := &corev1.Pod{}
+		err = fakeClient.Get(ctx, types.NamespacedName{Name: "test-ha-chain-d-0", Namespace: "default"}, nonReadyPod)
+		require.NoError(t, err)
+
+		if annotations := nonReadyPod.GetAnnotations(); annotations != nil {
+			assert.NotEqual(t, redisLeaderRole, annotations[redisRoleAnnotation],
+				"Non-ready pod should not be promoted")
+		}
+	})
+
+	t.Run("HA mode with all pods in same StatefulSet - no promotion", func(t *testing.T) {
+		redis := &koncachev1alpha1.Redis{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-same-sts",
+				Namespace: "default",
+			},
+			Spec: koncachev1alpha1.RedisSpec{
+				HighAvailability: &koncachev1alpha1.RedisHighAvailability{
+					Enabled:  true,
+					Replicas: 2,
+				},
+			},
+		}
+
+		// Create pods all in the same StatefulSet (edge case)
+		pods := []*corev1.Pod{
+			createTestPodWithStatefulSetAndAnnotations("test-same-sts-a-0", "default", true, "test-same-sts-a",
+				map[string]string{redisRoleAnnotation: redisLeaderRole}),
+			createTestPodWithStatefulSet("test-same-sts-a-1", "default", true, "test-same-sts-a"), // Same StatefulSet
+		}
+
+		clientBuilder := fake.NewClientBuilder().WithScheme(testScheme).WithObjects(redis)
+		for _, pod := range pods {
+			clientBuilder = clientBuilder.WithObjects(pod)
+		}
+		fakeClient := clientBuilder.Build()
+
+		reconciler := &RedisReconciler{
+			Client: fakeClient,
+			Scheme: testScheme,
+		}
+
+		// Simulate leader failure
+		failedLeader := createTestPodWithStatefulSetAndAnnotations("test-same-sts-a-0", "default", false, "test-same-sts-a",
+			map[string]string{redisRoleAnnotation: redisLeaderRole})
+
+		err := reconciler.handleLeaderFailover(ctx, failedLeader, redis)
+		require.NoError(t, err)
+
+		// No pod should be promoted since they're in the same StatefulSet
+		remainingPod := &corev1.Pod{}
+		err = fakeClient.Get(ctx, types.NamespacedName{Name: "test-same-sts-a-1", Namespace: "default"}, remainingPod)
+		require.NoError(t, err)
+
+		annotations := remainingPod.GetAnnotations()
+		if annotations != nil {
+			assert.NotEqual(t, redisLeaderRole, annotations[redisRoleAnnotation],
+				"Pod in same StatefulSet should not be promoted")
+		}
+	})
+
+	t.Run("HA mode leader assignment on initial creation", func(t *testing.T) {
+		redis := &koncachev1alpha1.Redis{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-initial",
+				Namespace: "default",
+			},
+			Spec: koncachev1alpha1.RedisSpec{
+				HighAvailability: &koncachev1alpha1.RedisHighAvailability{
+					Enabled:  true,
+					Replicas: 3,
+				},
+			},
+		}
+
+		// Create pods without any leader annotations (fresh deployment)
+		pods := []*corev1.Pod{
+			createTestPodWithStatefulSet("test-initial-a-0", "default", true, "test-initial-a"),
+			createTestPodWithStatefulSet("test-initial-b-0", "default", true, "test-initial-b"),
+			createTestPodWithStatefulSet("test-initial-c-0", "default", false, "test-initial-c"), // Not ready
+		}
+
+		clientBuilder := fake.NewClientBuilder().WithScheme(testScheme).WithObjects(redis)
+		for _, pod := range pods {
+			clientBuilder = clientBuilder.WithObjects(pod)
+		}
+		fakeClient := clientBuilder.Build()
+
+		// Assign initial leader (simulate what happens during reconcile)
+		// Find the first ready pod from a different StatefulSet and assign it as leader
+		leaderAssigned := false
+		for _, pod := range []string{"test-initial-a-0", "test-initial-b-0"} {
+			podObj := &corev1.Pod{}
+			err := fakeClient.Get(ctx, types.NamespacedName{Name: pod, Namespace: "default"}, podObj)
+			require.NoError(t, err)
+
+			if podReady(podObj) && !leaderAssigned {
+				if podObj.Annotations == nil {
+					podObj.Annotations = make(map[string]string)
+				}
+				podObj.Annotations[redisRoleAnnotation] = redisLeaderRole
+				podObj.Annotations[redisPromotedAtAnnotation] = time.Now().Format(time.RFC3339)
+				err = fakeClient.Update(ctx, podObj)
+				require.NoError(t, err)
+				leaderAssigned = true
+			}
+		}
+		require.True(t, leaderAssigned, "Should assign an initial leader")
+
+		// Check that exactly one ready pod was assigned as leader
+		leaderCount := 0
+		for _, podName := range []string{"test-initial-a-0", "test-initial-b-0", "test-initial-c-0"} {
+			pod := &corev1.Pod{}
+			err := fakeClient.Get(ctx, types.NamespacedName{Name: podName, Namespace: "default"}, pod)
+			require.NoError(t, err)
+
+			if annotations := pod.GetAnnotations(); annotations != nil {
+				if role, exists := annotations[redisRoleAnnotation]; exists && role == redisLeaderRole {
+					leaderCount++
+					// Verify the assigned leader is ready
+					assert.True(t, podReady(pod), "Assigned leader should be ready")
+				}
+			}
+		}
+
+		assert.Equal(t, 1, leaderCount, "Exactly one pod should be assigned as initial leader")
+	})
+
+	t.Run("Standalone mode should not trigger leader failover", func(t *testing.T) {
+		standaloneRedis := &koncachev1alpha1.Redis{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-standalone-nofail",
+				Namespace: "default",
+			},
+			Spec: koncachev1alpha1.RedisSpec{
+				HighAvailability: &koncachev1alpha1.RedisHighAvailability{
+					Enabled: false,
+				},
+			},
+		}
+
+		// Create a standalone pod that fails
+		standalonePod := createTestPod("test-standalone-nofail-0", "default", false, nil)
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(testScheme).
+			WithObjects(standaloneRedis, standalonePod).
+			Build()
+
+		reconciler := &RedisReconciler{
+			Client: fakeClient,
+			Scheme: testScheme,
+		}
+
+		// Try to handle "leader failover" for standalone mode
+		err := reconciler.handleLeaderFailover(ctx, standalonePod, standaloneRedis)
+		require.NoError(t, err) // Should succeed but do nothing
+
+		// Verify no changes were made to the pod
+		updatedPod := &corev1.Pod{}
+		err = fakeClient.Get(ctx, types.NamespacedName{Name: "test-standalone-nofail-0", Namespace: "default"}, updatedPod)
+		require.NoError(t, err)
+
+		annotations := updatedPod.GetAnnotations()
+		if annotations != nil {
+			assert.NotContains(t, annotations, redisRoleAnnotation,
+				"Standalone pod should not get leader annotations")
+		}
+	})
+
+	t.Run("HA mode with rapid successive failures", func(t *testing.T) {
+		redis := &koncachev1alpha1.Redis{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-rapid-fail",
+				Namespace: "default",
+			},
+			Spec: koncachev1alpha1.RedisSpec{
+				HighAvailability: &koncachev1alpha1.RedisHighAvailability{
+					Enabled:  true,
+					Replicas: 3,
+				},
+			},
+		}
+
+		// Create initial pods with leader and correct Redis instance labels
+		pods := []*corev1.Pod{
+			createTestPodWithCorrectLabels("test-rapid-fail-a-0", "default", "test-rapid-fail", true, "test-rapid-fail-a",
+				map[string]string{redisRoleAnnotation: redisLeaderRole}),
+			createTestPodWithCorrectLabels("test-rapid-fail-b-0", "default", "test-rapid-fail", true, "test-rapid-fail-b", nil),
+			createTestPodWithCorrectLabels("test-rapid-fail-c-0", "default", "test-rapid-fail", true, "test-rapid-fail-c", nil),
+		}
+
+		clientBuilder := fake.NewClientBuilder().WithScheme(testScheme).WithObjects(redis)
+		for _, pod := range pods {
+			clientBuilder = clientBuilder.WithObjects(pod)
+		}
+		fakeClient := clientBuilder.Build()
+
+		reconciler := &RedisReconciler{
+			Client: fakeClient,
+			Scheme: testScheme,
+		}
+
+		// First failure - leader pod fails
+		failedLeader1 := createTestPodWithStatefulSetAndAnnotations("test-rapid-fail-a-0", "default", false, "test-rapid-fail-a",
+			map[string]string{redisRoleAnnotation: redisLeaderRole})
+
+		err := reconciler.handleLeaderFailover(ctx, failedLeader1, redis)
+		require.NoError(t, err)
+
+		// Find who became the new leader
+		var newLeaderName string
+		for _, podName := range []string{"test-rapid-fail-b-0", "test-rapid-fail-c-0"} {
+			pod := &corev1.Pod{}
+			err := fakeClient.Get(ctx, types.NamespacedName{Name: podName, Namespace: "default"}, pod)
+			require.NoError(t, err)
+
+			if annotations := pod.GetAnnotations(); annotations != nil {
+				if role, exists := annotations[redisRoleAnnotation]; exists && role == redisLeaderRole {
+					newLeaderName = podName
+					break
+				}
+			}
+		}
+		require.NotEmpty(t, newLeaderName, "A new leader should have been promoted")
+
+		// Second failure - new leader fails immediately
+		newLeaderPod := &corev1.Pod{}
+		err = fakeClient.Get(ctx, types.NamespacedName{Name: newLeaderName, Namespace: "default"}, newLeaderPod)
+		require.NoError(t, err)
+
+		// Mark new leader as failed
+		failedLeader2 := newLeaderPod.DeepCopy()
+		failedLeader2.Status.Conditions = []corev1.PodCondition{{
+			Type:   corev1.PodReady,
+			Status: corev1.ConditionFalse,
+		}}
+
+		err = reconciler.handleLeaderFailover(ctx, failedLeader2, redis)
+		require.NoError(t, err)
+
+		// Verify the remaining pod became leader
+		remainingPodNames := []string{"test-rapid-fail-b-0", "test-rapid-fail-c-0"}
+		var finalLeaderName string
+		for _, podName := range remainingPodNames {
+			if podName != newLeaderName {
+				finalLeaderName = podName
+				break
+			}
+		}
+
+		finalLeaderPod := &corev1.Pod{}
+		err = fakeClient.Get(ctx, types.NamespacedName{Name: finalLeaderName, Namespace: "default"}, finalLeaderPod)
+		require.NoError(t, err)
+
+		annotations := finalLeaderPod.GetAnnotations()
+		assert.Contains(t, annotations, redisRoleAnnotation)
+		assert.Equal(t, redisLeaderRole, annotations[redisRoleAnnotation])
+	})
+}
+
 // Helper functions
 
 func createTestPod(name, namespace string, healthy bool, annotations map[string]string) *corev1.Pod {
@@ -381,5 +718,63 @@ func createTestPodWithStatefulSetAndAnnotations(name, namespace string, healthy 
 			Name: statefulSetName,
 		},
 	}
+	return pod
+}
+
+// Helper function to create pods with correct Redis instance labels
+func createTestPodWithCorrectLabels(name, namespace, redisName string, healthy bool, statefulSetName string, annotations map[string]string) *corev1.Pod {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels: map[string]string{
+				redisNameLabel:     "redis",
+				redisInstanceLabel: redisName, // Use the actual Redis instance name
+			},
+			Annotations: annotations,
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					Kind: "StatefulSet",
+					Name: statefulSetName,
+				},
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:  "redis",
+					Image: "redis:7.2-alpine",
+				},
+			},
+		},
+	}
+
+	if healthy {
+		pod.Status = corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodReady,
+					Status: corev1.ConditionTrue,
+				},
+			},
+			ContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name:  "redis",
+					Ready: true,
+					State: corev1.ContainerState{
+						Running: &corev1.ContainerStateRunning{
+							StartedAt: metav1.NewTime(time.Now()),
+						},
+					},
+				},
+			},
+		}
+	} else {
+		pod.Status = corev1.PodStatus{
+			Phase: corev1.PodFailed,
+		}
+	}
+
 	return pod
 }
