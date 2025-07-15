@@ -20,6 +20,19 @@ import (
 	koncachev1alpha1 "github.com/GreedyKomodoDragon/redis-operator/api/v1alpha1"
 )
 
+const (
+	// Label constants
+	redisNameLabel     = "app.kubernetes.io/name"
+	redisInstanceLabel = "app.kubernetes.io/instance"
+
+	// Annotation constants
+	redisRoleAnnotation       = "redis-operator/role"
+	redisPromotedAtAnnotation = "redis-operator/promoted-at"
+
+	// Role values
+	redisLeaderRole = "leader"
+)
+
 // RedisReconciler reconciles a Redis object
 type RedisReconciler struct {
 	client.Client
@@ -36,7 +49,7 @@ type RedisReconciler struct {
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;update;patch;delete
 
@@ -112,7 +125,7 @@ func (r *RedisReconciler) handlePodEvent(ctx context.Context, obj client.Object)
 	}
 
 	// Only process pods that belong to Redis instances
-	if pod.Labels["app.kubernetes.io/name"] != "redis" {
+	if pod.Labels[redisNameLabel] != "redis" {
 		return []reconcile.Request{}
 	}
 
@@ -145,6 +158,11 @@ func (r *RedisReconciler) detectPodFailure(ctx context.Context, pod *corev1.Pod)
 	// Log the failure
 	r.logPodFailure(ctx, pod, redis.Name, reason)
 
+	// Check if the failed pod was the leader and handle leader promotion
+	if err := r.handleLeaderFailover(ctx, pod, redis); err != nil {
+		return fmt.Errorf("failed to handle leader failover: %w", err)
+	}
+
 	// Trigger a reconciliation of the Redis instance for failover
 	return r.triggerRedisReconciliation(ctx, redis)
 }
@@ -152,7 +170,7 @@ func (r *RedisReconciler) detectPodFailure(ctx context.Context, pod *corev1.Pod)
 // shouldProcessPodFailure determines if we should process this pod for failure detection
 func (r *RedisReconciler) shouldProcessPodFailure(ctx context.Context, pod *corev1.Pod) (*koncachev1alpha1.Redis, bool) {
 	// Check if this pod belongs to a Redis instance
-	redisName, exists := pod.Labels["app.kubernetes.io/instance"]
+	redisName, exists := pod.Labels[redisInstanceLabel]
 	if !exists {
 		return nil, false // Not a Redis pod
 	}
@@ -378,8 +396,8 @@ func (r *RedisReconciler) DetectPodFailures(ctx context.Context, redis *koncache
 	listOpts := []client.ListOption{
 		client.InNamespace(redis.Namespace),
 		client.MatchingLabels{
-			"app.kubernetes.io/name":     "redis",
-			"app.kubernetes.io/instance": redis.Name,
+			redisNameLabel:     "redis",
+			redisInstanceLabel: redis.Name,
 		},
 	}
 
@@ -404,4 +422,188 @@ func (r *RedisReconciler) DetectPodFailures(ctx context.Context, redis *koncache
 			}
 		}
 	}
+}
+
+// handleLeaderFailover handles leader promotion when a leader pod fails
+func (r *RedisReconciler) handleLeaderFailover(ctx context.Context, failedPod *corev1.Pod, redis *koncachev1alpha1.Redis) error {
+	log := logf.FromContext(ctx)
+
+	// Check if the failed pod was the leader
+	isLeader := r.isPodLeader(failedPod)
+	if !isLeader {
+		log.Info("Failed pod was not the leader, no leader promotion needed",
+			"pod", failedPod.Name,
+			"namespace", failedPod.Namespace)
+		return nil
+	}
+
+	log.Info("Leader pod failed, initiating leader promotion",
+		"failedPod", failedPod.Name,
+		"namespace", failedPod.Namespace,
+		"redis", redis.Name)
+
+	// Find candidate pods from other StatefulSets
+	candidatePods, err := r.findLeaderCandidates(ctx, redis, failedPod)
+	if err != nil {
+		return fmt.Errorf("failed to find leader candidates: %w", err)
+	}
+
+	if len(candidatePods) == 0 {
+		log.Info("No healthy candidate pods found for leader promotion")
+		return nil
+	}
+
+	// Select the best candidate (first healthy pod found)
+	newLeader := candidatePods[0]
+
+	// Promote the new leader
+	if err := r.promoteNewLeader(ctx, newLeader, failedPod); err != nil {
+		return fmt.Errorf("failed to promote new leader: %w", err)
+	}
+
+	log.Info("Successfully promoted new leader",
+		"newLeader", newLeader.Name,
+		"failedPod", failedPod.Name,
+		"redis", redis.Name)
+
+	return nil
+}
+
+// isPodLeader checks if a pod is currently marked as the leader
+func (r *RedisReconciler) isPodLeader(pod *corev1.Pod) bool {
+	if pod.Annotations == nil {
+		return false
+	}
+	return pod.Annotations[redisRoleAnnotation] == redisLeaderRole
+}
+
+// findLeaderCandidates finds healthy pods from other StatefulSets that can become the leader
+func (r *RedisReconciler) findLeaderCandidates(ctx context.Context, redis *koncachev1alpha1.Redis, failedPod *corev1.Pod) ([]*corev1.Pod, error) {
+	log := logf.FromContext(ctx)
+
+	// List all pods belonging to this Redis instance
+	podList := &corev1.PodList{}
+	listOpts := []client.ListOption{
+		client.InNamespace(redis.Namespace),
+		client.MatchingLabels{
+			redisNameLabel:     "redis",
+			redisInstanceLabel: redis.Name,
+		},
+	}
+
+	err := r.List(ctx, podList, listOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list pods: %w", err)
+	}
+
+	var candidates []*corev1.Pod
+	failedStatefulSetName := r.getStatefulSetNameFromPod(failedPod)
+
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+
+		// Skip the failed pod
+		if pod.Name == failedPod.Name {
+			continue
+		}
+
+		// Skip pods from the same StatefulSet as the failed pod
+		podStatefulSetName := r.getStatefulSetNameFromPod(pod)
+		if podStatefulSetName == failedStatefulSetName {
+			continue
+		}
+
+		// Check if pod is healthy and ready
+		if r.isPodHealthyAndReady(pod) {
+			candidates = append(candidates, pod)
+			log.Info("Found leader candidate",
+				"candidate", pod.Name,
+				"statefulSet", podStatefulSetName,
+				"phase", pod.Status.Phase)
+		}
+	}
+
+	return candidates, nil
+}
+
+// getStatefulSetNameFromPod extracts the StatefulSet name from a pod's owner references
+func (r *RedisReconciler) getStatefulSetNameFromPod(pod *corev1.Pod) string {
+	for _, ownerRef := range pod.OwnerReferences {
+		if ownerRef.Kind == "StatefulSet" {
+			return ownerRef.Name
+		}
+	}
+	return ""
+}
+
+// isPodHealthyAndReady checks if a pod is healthy and ready to become leader
+func (r *RedisReconciler) isPodHealthyAndReady(pod *corev1.Pod) bool {
+	// Check pod phase
+	if pod.Status.Phase != corev1.PodRunning {
+		return false
+	}
+
+	// Check if pod is ready
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+
+	// Check container status
+	for _, containerStatus := range pod.Status.ContainerStatuses {
+		if containerStatus.Name == "redis" {
+			return containerStatus.Ready && containerStatus.State.Running != nil
+		}
+	}
+
+	return false
+}
+
+// promoteNewLeader promotes a pod to be the new leader
+func (r *RedisReconciler) promoteNewLeader(ctx context.Context, newLeader *corev1.Pod, failedPod *corev1.Pod) error {
+	log := logf.FromContext(ctx)
+
+	// Remove leader annotation from the failed pod (if still accessible)
+	if err := r.removeLeaderAnnotation(ctx, failedPod); err != nil {
+		log.Error(err, "Failed to remove leader annotation from failed pod", "pod", failedPod.Name)
+		// Don't fail the promotion if we can't update the failed pod
+	}
+
+	// Add leader annotation to the new leader pod
+	if err := r.addLeaderAnnotation(ctx, newLeader); err != nil {
+		return fmt.Errorf("failed to add leader annotation to new leader: %w", err)
+	}
+
+	log.Info("Leader promotion completed",
+		"newLeader", newLeader.Name,
+		"newLeaderStatefulSet", r.getStatefulSetNameFromPod(newLeader),
+		"failedPod", failedPod.Name,
+		"failedStatefulSet", r.getStatefulSetNameFromPod(failedPod))
+
+	return nil
+}
+
+// addLeaderAnnotation adds the leader annotation to a pod
+func (r *RedisReconciler) addLeaderAnnotation(ctx context.Context, pod *corev1.Pod) error {
+	// Create a patch to add the leader annotation
+	if pod.Annotations == nil {
+		pod.Annotations = make(map[string]string)
+	}
+	pod.Annotations[redisRoleAnnotation] = redisLeaderRole
+	pod.Annotations[redisPromotedAtAnnotation] = time.Now().Format(time.RFC3339)
+
+	return r.Update(ctx, pod)
+}
+
+// removeLeaderAnnotation removes the leader annotation from a pod
+func (r *RedisReconciler) removeLeaderAnnotation(ctx context.Context, pod *corev1.Pod) error {
+	if pod.Annotations == nil {
+		return nil // No annotations to remove
+	}
+
+	delete(pod.Annotations, redisRoleAnnotation)
+	delete(pod.Annotations, redisPromotedAtAnnotation)
+
+	return r.Update(ctx, pod)
 }
