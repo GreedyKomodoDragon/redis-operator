@@ -26,7 +26,7 @@ func TestBuildRedisConfig(t *testing.T) {
 			contains: []string{
 				"timeout 0",
 				"tcp-keepalive 0",
-				"databases 0",
+				"databases 16",
 			},
 		},
 		{

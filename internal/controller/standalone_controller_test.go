@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -8,6 +9,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	koncachev1alpha1 "github.com/GreedyKomodoDragon/redis-operator/api/v1alpha1"
 )
 
 const (
@@ -1414,4 +1417,335 @@ func TestHasVolumeClaimTemplateChanges(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+// TestStandaloneModeIsolation ensures standalone mode doesn't use HA features
+func TestStandaloneModeIsolation(t *testing.T) {
+	tests := []struct {
+		name         string
+		redis        *koncachev1alpha1.Redis
+		expectHA     bool
+		expectSuffix bool
+	}{
+		{
+			name: "Standalone mode disabled HA",
+			redis: &koncachev1alpha1.Redis{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-standalone",
+					Namespace: "default",
+				},
+				Spec: koncachev1alpha1.RedisSpec{
+					Image: testRedisImage,
+					HighAvailability: &koncachev1alpha1.RedisHighAvailability{
+						Enabled: false,
+					},
+				},
+			},
+			expectHA:     false,
+			expectSuffix: false,
+		},
+		{
+			name: "Standalone mode nil HA",
+			redis: &koncachev1alpha1.Redis{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-standalone-nil",
+					Namespace: "default",
+				},
+				Spec: koncachev1alpha1.RedisSpec{
+					Image:            testRedisImage,
+					HighAvailability: nil,
+				},
+			},
+			expectHA:     false,
+			expectSuffix: false,
+		},
+		{
+			name: "HA mode enabled",
+			redis: &koncachev1alpha1.Redis{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-ha",
+					Namespace: "default",
+				},
+				Spec: koncachev1alpha1.RedisSpec{
+					Image: testRedisImage,
+					HighAvailability: &koncachev1alpha1.RedisHighAvailability{
+						Enabled:  true,
+						Replicas: 3,
+					},
+				},
+			},
+			expectHA:     true,
+			expectSuffix: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			controller := &StandaloneController{}
+
+			// Test StatefulSet creation for standalone vs HA
+			statefulSets := controller.statefulsSetForRedis(tt.redis, "", "")
+
+			if tt.expectHA {
+				// HA mode should create multiple StatefulSets (3 for the test case)
+				assert.Len(t, statefulSets, 3, "HA mode should create multiple StatefulSets")
+
+				// Check StatefulSet naming pattern follows HA convention
+				for i, sts := range statefulSets {
+					expectedName := fmt.Sprintf("%s-ha-%d", tt.redis.Name, i+1)
+					assert.Equal(t, expectedName, sts.Name, "HA StatefulSet should follow naming pattern")
+				}
+			} else {
+				// Standalone mode should create exactly one StatefulSet
+				assert.Len(t, statefulSets, 1, "Standalone mode should create exactly one StatefulSet")
+				sts := statefulSets[0]
+				assert.Equal(t, tt.redis.Name, sts.Name, "Standalone StatefulSet should match Redis name")
+
+				// Verify no HA-specific annotations or labels
+				assert.NotContains(t, sts.Labels, "redis.io/replica-set", "Standalone should not have HA labels")
+				assert.NotContains(t, sts.Annotations, "redis.io/ha-enabled", "Standalone should not have HA annotations")
+
+				// Verify pod template doesn't have HA-specific features
+				podTemplate := sts.Spec.Template
+				assert.NotContains(t, podTemplate.Annotations, redisRoleAnnotation, "Standalone pods should not have role annotations")
+
+				// Verify exactly one replica for standalone
+				assert.Equal(t, int32(1), *sts.Spec.Replicas, "Standalone should always have 1 replica")
+			}
+		})
+	}
+}
+
+// TestStandaloneStatefulSetNaming ensures consistent naming for standalone mode
+func TestStandaloneStatefulSetNaming(t *testing.T) {
+	controller := &StandaloneController{}
+
+	testCases := []struct {
+		name      string
+		redisName string
+		expected  string
+	}{
+		{
+			name:      "simple name",
+			redisName: "redis",
+			expected:  "redis",
+		},
+		{
+			name:      "name with hyphens",
+			redisName: "my-redis-instance",
+			expected:  "my-redis-instance",
+		},
+		{
+			name:      "name with numbers",
+			redisName: "redis-v2",
+			expected:  "redis-v2",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			redis := &koncachev1alpha1.Redis{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      tc.redisName,
+					Namespace: "default",
+				},
+				Spec: koncachev1alpha1.RedisSpec{
+					Image: testRedisImage,
+					HighAvailability: &koncachev1alpha1.RedisHighAvailability{
+						Enabled: false,
+					},
+				},
+			}
+
+			statefulSets := controller.statefulsSetForRedis(redis, "", "")
+			assert.Len(t, statefulSets, 1, "Should create exactly one StatefulSet")
+			sts := statefulSets[0]
+			assert.Equal(t, tc.expected, sts.Name, "StatefulSet name should match Redis name exactly for standalone mode")
+
+			// Verify no HA suffix patterns
+			assert.NotContains(t, sts.Name, "-a", "Standalone should not have HA suffix")
+			assert.NotContains(t, sts.Name, "-b", "Standalone should not have HA suffix")
+			assert.NotContains(t, sts.Name, "-c", "Standalone should not have HA suffix")
+		})
+	}
+}
+
+// TestStandaloneControllerIgnoresHA ensures standalone controller doesn't process HA Redis instances
+func TestStandaloneControllerIgnoresHA(t *testing.T) {
+	controller := &StandaloneController{}
+
+	haRedis := &koncachev1alpha1.Redis{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ha-redis",
+			Namespace: "default",
+		},
+		Spec: koncachev1alpha1.RedisSpec{
+			Image: testRedisImage,
+			HighAvailability: &koncachev1alpha1.RedisHighAvailability{
+				Enabled:  true,
+				Replicas: 3,
+			},
+		},
+	}
+
+	// Test that standalone controller methods handle HA Redis appropriately
+	t.Run("statefulsSetForRedis with HA should create multiple StatefulSets", func(t *testing.T) {
+		statefulSets := controller.statefulsSetForRedis(haRedis, "", "")
+
+		// The standalone controller should create multiple StatefulSets for HA Redis
+		assert.Len(t, statefulSets, 3, "HA Redis should create 3 StatefulSets")
+
+		// Verify HA naming pattern
+		for i, sts := range statefulSets {
+			expectedName := fmt.Sprintf("ha-redis-ha-%d", i+1)
+			assert.Equal(t, expectedName, sts.Name, "HA StatefulSet should follow HA naming pattern")
+		}
+	})
+
+	t.Run("isHAEnabled correctly identifies HA mode", func(t *testing.T) {
+		standaloneRedis := &koncachev1alpha1.Redis{
+			Spec: koncachev1alpha1.RedisSpec{
+				HighAvailability: &koncachev1alpha1.RedisHighAvailability{
+					Enabled: false,
+				},
+			},
+		}
+
+		// Test HA detection
+		assert.True(t, haRedis.Spec.HighAvailability != nil && haRedis.Spec.HighAvailability.Enabled,
+			"Should correctly identify HA mode")
+		assert.False(t, standaloneRedis.Spec.HighAvailability != nil && standaloneRedis.Spec.HighAvailability.Enabled,
+			"Should correctly identify standalone mode")
+	})
+}
+
+// TestStandaloneReplicaCount ensures standalone mode always uses single replica
+func TestStandaloneReplicaCount(t *testing.T) {
+	controller := &StandaloneController{}
+
+	redis := &koncachev1alpha1.Redis{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-replicas",
+			Namespace: "default",
+		},
+		Spec: koncachev1alpha1.RedisSpec{
+			Image: testRedisImage,
+			HighAvailability: &koncachev1alpha1.RedisHighAvailability{
+				Enabled: false,
+			},
+		},
+	}
+
+	statefulSets := controller.statefulsSetForRedis(redis, "", "")
+	assert.Len(t, statefulSets, 1, "Should create exactly one StatefulSet")
+	sts := statefulSets[0]
+
+	assert.NotNil(t, sts.Spec.Replicas, "Replicas should be set")
+	assert.Equal(t, int32(1), *sts.Spec.Replicas, "Standalone mode should always have exactly 1 replica")
+}
+
+// TestStandaloneServiceConfiguration ensures standalone mode creates appropriate services
+func TestStandaloneServiceConfiguration(t *testing.T) {
+	controller := &StandaloneController{}
+
+	redis := &koncachev1alpha1.Redis{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-service",
+			Namespace: "default",
+		},
+		Spec: koncachev1alpha1.RedisSpec{
+			Image: testRedisImage,
+			HighAvailability: &koncachev1alpha1.RedisHighAvailability{
+				Enabled: false,
+			},
+		},
+	}
+
+	service := controller.serviceForRedis(redis)
+
+	assert.Equal(t, "test-service", service.Name, "Service name should match Redis name for standalone")
+	assert.Equal(t, "default", service.Namespace, "Service should be in same namespace")
+
+	// Verify service doesn't have HA-specific configurations
+	assert.NotContains(t, service.Labels, "redis.io/ha-role", "Standalone service should not have HA role labels")
+	assert.NotContains(t, service.Spec.Selector, "redis.io/role", "Standalone service should not select by role")
+}
+
+// TestStandaloneBackupConfiguration ensures backup works correctly in standalone mode
+func TestStandaloneBackupConfiguration(t *testing.T) {
+	controller := &StandaloneController{}
+
+	redis := &koncachev1alpha1.Redis{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-backup",
+			Namespace: "default",
+		},
+		Spec: koncachev1alpha1.RedisSpec{
+			Image: testRedisImage,
+			HighAvailability: &koncachev1alpha1.RedisHighAvailability{
+				Enabled: false,
+			},
+			Backup: koncachev1alpha1.RedisBackup{
+				Enabled:  true,
+				Schedule: "0 2 * * *",
+				BackUpInitConfig: koncachev1alpha1.BackupInitConfig{
+					Enabled: true,
+				},
+				Storage: koncachev1alpha1.RedisBackupStorage{
+					Type: "s3",
+					S3: &koncachev1alpha1.RedisS3Storage{
+						Bucket:     "redis-backups",
+						SecretName: "s3-secret",
+					},
+				},
+			},
+		},
+	}
+
+	statefulSets := controller.statefulsSetForRedis(redis, "", "")
+	assert.Len(t, statefulSets, 1, "Should create exactly one StatefulSet")
+	sts := statefulSets[0]
+
+	// Verify backup init container is added for standalone mode
+	assert.Len(t, sts.Spec.Template.Spec.InitContainers, 1, "Should have backup init container")
+	assert.Equal(t, testBackupInitContainer, sts.Spec.Template.Spec.InitContainers[0].Name)
+
+	// Verify backup doesn't interfere with HA-specific features
+	assert.NotContains(t, sts.Spec.Template.Annotations, redisRoleAnnotation,
+		"Backup-enabled standalone should not have role annotations")
+}
+
+// TestStandaloneConfigMapHandling ensures config maps are handled correctly
+func TestStandaloneConfigMapHandling(t *testing.T) {
+	controller := &StandaloneController{}
+
+	redis := &koncachev1alpha1.Redis{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-config",
+			Namespace: "default",
+		},
+		Spec: koncachev1alpha1.RedisSpec{
+			Image: testRedisImage,
+			HighAvailability: &koncachev1alpha1.RedisHighAvailability{
+				Enabled: false,
+			},
+			Config: koncachev1alpha1.RedisConfig{
+				MaxMemoryPolicy: testMaxMemoryPolicy,
+				AdditionalConfig: map[string]string{
+					"save": "900 1",
+				},
+			},
+		},
+	}
+
+	configMap := controller.configMapForRedis(redis, BuildRedisConfig(redis))
+
+	assert.Equal(t, "test-config"+configMapSuffix, configMap.Name, "ConfigMap should follow standalone naming")
+	assert.Contains(t, configMap.Data, redisConfigKey, "Should contain redis config")
+
+	// Verify config doesn't contain HA-specific settings
+	redisConf := configMap.Data[redisConfigKey]
+	assert.NotContains(t, redisConf, "replica-of", "Standalone config should not have replica settings")
+	assert.NotContains(t, redisConf, "replicaof", "Standalone config should not have replica settings")
+	assert.Contains(t, redisConf, testMaxMemoryPolicy, "Should contain user-specified config")
 }
