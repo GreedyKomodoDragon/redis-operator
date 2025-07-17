@@ -491,14 +491,6 @@ func (s *StandaloneController) statefulsSetForRedis(redis *koncachev1alpha1.Redi
 
 	// For HA Redis, we create multiple StatefulSets
 	for i := 0; i < int(redis.Spec.HighAvailability.Replicas); i++ {
-		// if i == 0 {
-		// 	// mark the first StatefulSet as primary
-		// 	labels["app.kubernetes.io/role"] = "primary"
-		// } else {
-		// 	// mark subsequent StatefulSets as replicas
-		// 	labels["app.kubernetes.io/role"] = "replica"
-		// }
-
 		statefulsets = append(statefulsets, &appsv1.StatefulSet{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      redis.Name + fmt.Sprintf("-ha-%d", i+1),
@@ -525,23 +517,38 @@ func (s *StandaloneController) statefulsSetForRedis(redis *koncachev1alpha1.Redi
 func (s *StandaloneController) updateRedisStatus(ctx context.Context, redis *koncachev1alpha1.Redis, statefulSets []*appsv1.StatefulSet) error {
 	// Create a retry mechanism to handle conflicts
 	return s.updateStatusWithRetry(ctx, redis, func(currentRedis *koncachev1alpha1.Redis) {
+		// Update status based on aggregated StatefulSet status
+		currentRedis.Status.ObservedGeneration = currentRedis.Generation
+
+		// Aggregate status across all StatefulSets
+		var totalReplicas, totalReadyReplicas int32
+		allReady := true
+
 		for _, statefulSet := range statefulSets {
-			// Update status based on StatefulSet status
-			currentRedis.Status.ObservedGeneration = currentRedis.Generation
-
-			currentRedis.Status.Ready = statefulSet.Status.ReadyReplicas == *statefulSet.Spec.Replicas
-			if currentRedis.Status.Ready {
-				currentRedis.Status.Phase = koncachev1alpha1.RedisPhaseRunning
-			} else {
-				currentRedis.Status.Phase = koncachev1alpha1.RedisPhasePending
+			if statefulSet.Spec.Replicas != nil {
+				totalReplicas += *statefulSet.Spec.Replicas
 			}
+			totalReadyReplicas += statefulSet.Status.ReadyReplicas
 
-			// Set endpoint
-			port := GetRedisPort(currentRedis)
-			currentRedis.Status.Endpoint = fmt.Sprintf("%s.%s.svc.cluster.local", currentRedis.Name, currentRedis.Namespace)
-			currentRedis.Status.Port = port
-			currentRedis.Status.Version = currentRedis.Spec.Version
+			// Check if this StatefulSet is fully ready
+			if statefulSet.Spec.Replicas == nil || statefulSet.Status.ReadyReplicas != *statefulSet.Spec.Replicas {
+				allReady = false
+			}
 		}
+
+		// Set overall readiness based on all StatefulSets
+		currentRedis.Status.Ready = allReady && totalReplicas > 0
+		if currentRedis.Status.Ready {
+			currentRedis.Status.Phase = koncachev1alpha1.RedisPhaseRunning
+		} else {
+			currentRedis.Status.Phase = koncachev1alpha1.RedisPhasePending
+		}
+
+		// Set endpoint and common fields (these don't vary by StatefulSet)
+		port := GetRedisPort(currentRedis)
+		currentRedis.Status.Endpoint = fmt.Sprintf("%s.%s.svc.cluster.local", currentRedis.Name, currentRedis.Namespace)
+		currentRedis.Status.Port = port
+		currentRedis.Status.Version = currentRedis.Spec.Version
 	})
 }
 
@@ -1313,13 +1320,37 @@ func (s *StandaloneController) getRedisPassword(ctx context.Context, redis *konc
 }
 
 // parseRedisCommand parses a Redis command string into arguments
-func parseRedisCommand(command string) []interface{} {
-	// Simple space-based parsing - in production you might want more sophisticated parsing
-	parts := strings.Fields(command)
-	args := make([]interface{}, len(parts))
-	for i, part := range parts {
-		args[i] = part
+func parseRedisCommand(command string) []any {
+	var args []any
+	var currentArg strings.Builder
+	inQuotes := false
+	escapeNext := false
+	for _, char := range command {
+		switch {
+		case escapeNext:
+			currentArg.WriteRune(char)
+			escapeNext = false
+		case char == '\\':
+			escapeNext = true
+		case char == '"' && !escapeNext:
+			inQuotes = !inQuotes
+			if !inQuotes {
+				args = append(args, currentArg.String())
+				currentArg.Reset()
+			}
+		case char == ' ' && !inQuotes:
+			if currentArg.Len() > 0 {
+				args = append(args, currentArg.String())
+				currentArg.Reset()
+			}
+		default:
+			currentArg.WriteRune(char)
+		}
 	}
+	if currentArg.Len() > 0 {
+		args = append(args, currentArg.String())
+	}
+
 	return args
 }
 
