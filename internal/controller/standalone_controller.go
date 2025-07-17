@@ -981,45 +981,6 @@ func (s *StandaloneController) hasEnvChanges(existing, desired *corev1.Container
 	return !EqualStringMaps(existingEnvMap, desiredEnvMap)
 }
 
-// RedisCommandExecutor interface for executing Redis commands
-type RedisCommandExecutor interface {
-	ExecuteRedisCommand(ctx context.Context, pod *corev1.Pod, command string) error
-}
-
-// RealRedisCommandExecutor implements actual Redis command execution
-type RealRedisCommandExecutor struct {
-	controller *StandaloneController
-}
-
-func (r *RealRedisCommandExecutor) ExecuteRedisCommand(ctx context.Context, pod *corev1.Pod, command string) error {
-	return r.controller.executeRedisCommand(ctx, pod, command)
-}
-
-// MockRedisCommandExecutor implements mock Redis command execution for testing
-type MockRedisCommandExecutor struct {
-	Commands []MockRedisCommand
-}
-
-type MockRedisCommand struct {
-	PodName      string
-	Command      string
-	ShouldError  bool
-	ErrorMessage string
-}
-
-func (m *MockRedisCommandExecutor) ExecuteRedisCommand(ctx context.Context, pod *corev1.Pod, command string) error {
-	mockCmd := MockRedisCommand{
-		PodName: pod.Name,
-		Command: command,
-	}
-	m.Commands = append(m.Commands, mockCmd)
-
-	if mockCmd.ShouldError {
-		return fmt.Errorf("mock error: %s", mockCmd.ErrorMessage)
-	}
-	return nil
-}
-
 // ensureLeaderExists ensures that there's at least one leader pod in HA mode
 func (s *StandaloneController) ensureLeaderExists(ctx context.Context, redis *koncachev1alpha1.Redis) error {
 	log := logf.FromContext(ctx)
