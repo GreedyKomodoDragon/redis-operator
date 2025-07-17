@@ -2,11 +2,15 @@ package controller
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"maps"
+	"net"
+	"strings"
 	"time"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+	redisClient "github.com/redis/go-redis/v9"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -36,15 +40,18 @@ const (
 // StandaloneController handles the reconciliation of standalone Redis instances
 type StandaloneController struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme          *runtime.Scheme
+	CommandExecutor RedisCommandExecutor
 }
 
 // NewStandaloneController creates a new StandaloneController
 func NewStandaloneController(client client.Client, scheme *runtime.Scheme) *StandaloneController {
-	return &StandaloneController{
+	controller := &StandaloneController{
 		Client: client,
 		Scheme: scheme,
 	}
+	controller.CommandExecutor = &RealRedisCommandExecutor{controller: controller}
+	return controller
 }
 
 // Reconcile handles the reconciliation of a standalone Redis instance
@@ -114,6 +121,12 @@ func (s *StandaloneController) Reconcile(ctx context.Context, redis *koncachev1a
 		if err := s.ensureLeaderExists(ctx, redis); err != nil {
 			log.Error(err, "Failed to ensure leader exists during requeue")
 			// Don't fail the reconciliation for leader assignment issues
+		}
+
+		// Configure Redis replication for HA
+		if err := s.ensureReplicationConfiguration(ctx, redis); err != nil {
+			log.Error(err, "Failed to configure Redis replication")
+			// Don't fail the reconciliation for replication config issues
 		}
 	}
 
@@ -968,6 +981,45 @@ func (s *StandaloneController) hasEnvChanges(existing, desired *corev1.Container
 	return !EqualStringMaps(existingEnvMap, desiredEnvMap)
 }
 
+// RedisCommandExecutor interface for executing Redis commands
+type RedisCommandExecutor interface {
+	ExecuteRedisCommand(ctx context.Context, pod *corev1.Pod, command string) error
+}
+
+// RealRedisCommandExecutor implements actual Redis command execution
+type RealRedisCommandExecutor struct {
+	controller *StandaloneController
+}
+
+func (r *RealRedisCommandExecutor) ExecuteRedisCommand(ctx context.Context, pod *corev1.Pod, command string) error {
+	return r.controller.executeRedisCommand(ctx, pod, command)
+}
+
+// MockRedisCommandExecutor implements mock Redis command execution for testing
+type MockRedisCommandExecutor struct {
+	Commands []MockRedisCommand
+}
+
+type MockRedisCommand struct {
+	PodName      string
+	Command      string
+	ShouldError  bool
+	ErrorMessage string
+}
+
+func (m *MockRedisCommandExecutor) ExecuteRedisCommand(ctx context.Context, pod *corev1.Pod, command string) error {
+	mockCmd := MockRedisCommand{
+		PodName: pod.Name,
+		Command: command,
+	}
+	m.Commands = append(m.Commands, mockCmd)
+
+	if mockCmd.ShouldError {
+		return fmt.Errorf("mock error: %s", mockCmd.ErrorMessage)
+	}
+	return nil
+}
+
 // ensureLeaderExists ensures that there's at least one leader pod in HA mode
 func (s *StandaloneController) ensureLeaderExists(ctx context.Context, redis *koncachev1alpha1.Redis) error {
 	log := logf.FromContext(ctx)
@@ -1057,6 +1109,8 @@ func (s *StandaloneController) isPodReadyForLeadership(pod *corev1.Pod) bool {
 
 // promoteToLeader promotes a pod to leader by adding the appropriate annotation
 func (s *StandaloneController) promoteToLeader(ctx context.Context, pod *corev1.Pod) error {
+	log := logf.FromContext(ctx)
+
 	if pod.Annotations == nil {
 		pod.Annotations = make(map[string]string)
 	}
@@ -1064,15 +1118,56 @@ func (s *StandaloneController) promoteToLeader(ctx context.Context, pod *corev1.
 	pod.Annotations[leaderAnnotationField] = "leader"
 	pod.Annotations["redis-operator/promoted-at"] = time.Now().Format(time.RFC3339)
 
-	return s.Update(ctx, pod)
+	if err := s.Update(ctx, pod); err != nil {
+		return fmt.Errorf("failed to update pod annotations: %w", err)
+	}
+
+	// Configure Redis as master
+	if err := s.configureRedisAsMaster(ctx, pod); err != nil {
+		log.Error(err, "Failed to configure Redis as master", "pod", pod.Name)
+		// Don't fail the promotion if Redis config fails - the pod is still marked as leader
+	}
+
+	log.Info("Successfully promoted pod to leader", "pod", pod.Name)
+	return nil
 }
 
-// cleanupOrphanedStatefulSets removes StatefulSets that are no longer needed
-func (s *StandaloneController) cleanupOrphanedStatefulSets(ctx context.Context, redis *koncachev1alpha1.Redis, expectedStatefulSets []*appsv1.StatefulSet) error {
+// configureRedisAsMaster configures a Redis instance to become the master
+func (s *StandaloneController) configureRedisAsMaster(ctx context.Context, pod *corev1.Pod) error {
 	log := logf.FromContext(ctx)
 
-	// List all StatefulSets owned by this Redis instance
-	statefulSetList := &appsv1.StatefulSetList{}
+	// Execute Redis command to make this instance a master
+	// This removes any existing replication configuration
+	commands := []string{
+		"REPLICAOF NO ONE",     // Stop being a replica
+		"CONFIG SET save \"\"", // Disable automatic saves during transition
+	}
+
+	for _, cmd := range commands {
+		if s.CommandExecutor != nil {
+			if err := s.CommandExecutor.ExecuteRedisCommand(ctx, pod, cmd); err != nil {
+				log.Error(err, "Failed to execute Redis command", "pod", pod.Name, "command", cmd)
+				return fmt.Errorf("failed to configure Redis as master: %w", err)
+			}
+		} else {
+			// Fallback to direct method call if CommandExecutor is not set
+			if err := s.executeRedisCommand(ctx, pod, cmd); err != nil {
+				log.Error(err, "Failed to execute Redis command", "pod", pod.Name, "command", cmd)
+				return fmt.Errorf("failed to configure Redis as master: %w", err)
+			}
+		}
+	}
+
+	log.Info("Successfully configured Redis as master", "pod", pod.Name)
+	return nil
+}
+
+// configureReplicationForFollowers configures all non-leader pods as replicas of the leader
+func (s *StandaloneController) configureReplicationForFollowers(ctx context.Context, redis *koncachev1alpha1.Redis, leaderPod *corev1.Pod) error {
+	log := logf.FromContext(ctx)
+
+	// List all pods for this Redis instance
+	podList := &corev1.PodList{}
 	listOpts := []client.ListOption{
 		client.InNamespace(redis.Namespace),
 		client.MatchingLabels{
@@ -1081,33 +1176,274 @@ func (s *StandaloneController) cleanupOrphanedStatefulSets(ctx context.Context, 
 		},
 	}
 
-	err := s.List(ctx, statefulSetList, listOpts...)
+	err := s.List(ctx, podList, listOpts...)
 	if err != nil {
-		return fmt.Errorf("failed to list StatefulSets: %w", err)
+		return fmt.Errorf("failed to list pods: %w", err)
 	}
 
-	// Create a set of expected StatefulSet names
+	// Get the leader's IP address for replication
+	leaderIP := leaderPod.Status.PodIP
+	if leaderIP == "" {
+		return fmt.Errorf("leader pod %s has no IP address", leaderPod.Name)
+	}
+
+	redisPort := GetRedisPort(redis)
+
+	// Configure each non-leader pod as a replica
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+
+		// Skip the leader pod
+		if pod.Name == leaderPod.Name {
+			continue
+		}
+
+		// Skip pods that aren't ready
+		if !s.isPodReadyForLeadership(pod) {
+			log.Info("Skipping non-ready pod for replication configuration", "pod", pod.Name)
+			continue
+		}
+
+		// Configure this pod as a replica
+		if err := s.configureRedisAsReplica(ctx, pod, leaderIP, redisPort); err != nil {
+			log.Error(err, "Failed to configure pod as replica", "pod", pod.Name, "leader", leaderPod.Name)
+			// Continue with other pods even if one fails
+		} else {
+			// Update pod annotation to mark as follower
+			if err := s.markPodAsFollower(ctx, pod); err != nil {
+				log.Error(err, "Failed to mark pod as follower", "pod", pod.Name)
+			}
+		}
+	}
+
+	return nil
+}
+
+// configureRedisAsReplica configures a Redis instance to become a replica of the specified master
+func (s *StandaloneController) configureRedisAsReplica(ctx context.Context, pod *corev1.Pod, masterIP string, masterPort int32) error {
+	log := logf.FromContext(ctx)
+
+	// Execute Redis command to make this instance a replica
+	cmd := fmt.Sprintf("REPLICAOF %s %d", masterIP, masterPort)
+
+	if s.CommandExecutor != nil {
+		if err := s.CommandExecutor.ExecuteRedisCommand(ctx, pod, cmd); err != nil {
+			return fmt.Errorf("failed to configure Redis as replica: %w", err)
+		}
+	} else {
+		// Fallback to direct method call if CommandExecutor is not set
+		if err := s.executeRedisCommand(ctx, pod, cmd); err != nil {
+			return fmt.Errorf("failed to configure Redis as replica: %w", err)
+		}
+	}
+
+	log.Info("Successfully configured Redis as replica",
+		"pod", pod.Name,
+		"master", masterIP,
+		"port", masterPort)
+	return nil
+}
+
+// markPodAsFollower updates pod annotations to mark it as a follower
+func (s *StandaloneController) markPodAsFollower(ctx context.Context, pod *corev1.Pod) error {
+	if pod.Annotations == nil {
+		pod.Annotations = make(map[string]string)
+	}
+
+	pod.Annotations[leaderAnnotationField] = "follower"
+	pod.Annotations["redis-operator/configured-at"] = time.Now().Format(time.RFC3339)
+
+	return s.Update(ctx, pod)
+}
+
+// executeRedisCommand executes a Redis command on the specified pod
+func (s *StandaloneController) executeRedisCommand(ctx context.Context, pod *corev1.Pod, command string) error {
+	log := logf.FromContext(ctx)
+
+	// Get Redis instance to access configuration
+	redis := &koncachev1alpha1.Redis{}
+	err := s.Get(ctx, types.NamespacedName{
+		Name:      pod.Labels["app.kubernetes.io/instance"],
+		Namespace: pod.Namespace,
+	}, redis)
+	if err != nil {
+		return fmt.Errorf("failed to get Redis instance: %w", err)
+	}
+
+	// Create Redis client options
+	addr := net.JoinHostPort(pod.Status.PodIP, fmt.Sprintf("%d", GetRedisPort(redis)))
+
+	opts := &redisClient.Options{
+		Addr:         addr,
+		DialTimeout:  10 * time.Second,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+	}
+
+	// Configure authentication if required
+	if redis.Spec.Security.RequireAuth != nil && *redis.Spec.Security.RequireAuth {
+		if redis.Spec.Security.PasswordSecret != nil {
+			password, err := s.getRedisPassword(ctx, redis)
+			if err != nil {
+				return fmt.Errorf("failed to get Redis password: %w", err)
+			}
+			opts.Password = password
+		}
+	}
+
+	// Configure TLS if enabled
+	if redis.Spec.Security.TLS != nil && redis.Spec.Security.TLS.Enabled {
+		opts.TLSConfig = &tls.Config{
+			ServerName: pod.Status.PodIP,
+			// In production, you might want to configure certificates properly
+			InsecureSkipVerify: true,
+		}
+	}
+
+	// Create Redis client
+	rdb := redisClient.NewClient(opts)
+	defer rdb.Close()
+
+	// Test connection
+	_, err = rdb.Ping(ctx).Result()
+	if err != nil {
+		return fmt.Errorf("failed to connect to Redis pod %s: %w", pod.Name, err)
+	}
+
+	// Execute the command
+	log.Info("Executing Redis command", "pod", pod.Name, "command", command)
+
+	// Parse the command and execute it
+	result := rdb.Do(ctx, parseRedisCommand(command)...)
+	if result.Err() != nil {
+		return fmt.Errorf("failed to execute Redis command '%s' on pod %s: %w", command, pod.Name, result.Err())
+	}
+
+	log.Info("Successfully executed Redis command", "pod", pod.Name, "command", command, "result", result.Val())
+	return nil
+}
+
+// getRedisPassword retrieves the Redis password from the secret
+func (s *StandaloneController) getRedisPassword(ctx context.Context, redis *koncachev1alpha1.Redis) (string, error) {
+	if redis.Spec.Security.PasswordSecret == nil {
+		return "", nil
+	}
+
+	secret := &corev1.Secret{}
+	err := s.Get(ctx, types.NamespacedName{
+		Name:      redis.Spec.Security.PasswordSecret.Name,
+		Namespace: redis.Namespace,
+	}, secret)
+	if err != nil {
+		return "", fmt.Errorf("failed to get password secret: %w", err)
+	}
+
+	key := redis.Spec.Security.PasswordSecret.Key
+	if key == "" {
+		key = "password" // default key
+	}
+
+	password, exists := secret.Data[key]
+	if !exists {
+		return "", fmt.Errorf("password key '%s' not found in secret '%s'", key, redis.Spec.Security.PasswordSecret.Name)
+	}
+
+	return string(password), nil
+}
+
+// parseRedisCommand parses a Redis command string into arguments
+func parseRedisCommand(command string) []interface{} {
+	// Simple space-based parsing - in production you might want more sophisticated parsing
+	parts := strings.Fields(command)
+	args := make([]interface{}, len(parts))
+	for i, part := range parts {
+		args[i] = part
+	}
+	return args
+}
+
+// ensureReplicationConfiguration ensures all pods have correct replication configuration
+func (s *StandaloneController) ensureReplicationConfiguration(ctx context.Context, redis *koncachev1alpha1.Redis) error {
+	log := logf.FromContext(ctx)
+
+	// Only configure replication for HA mode
+	if redis.Spec.HighAvailability == nil || !redis.Spec.HighAvailability.Enabled {
+		return nil
+	}
+
+	// Find the current leader
+	podList := &corev1.PodList{}
+	listOpts := []client.ListOption{
+		client.InNamespace(redis.Namespace),
+		client.MatchingLabels{
+			"app.kubernetes.io/name":     "redis",
+			"app.kubernetes.io/instance": redis.Name,
+		},
+	}
+
+	err := s.List(ctx, podList, listOpts...)
+	if err != nil {
+		return fmt.Errorf("failed to list pods: %w", err)
+	}
+
+	var leaderPod *corev1.Pod
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+		if pod.Annotations != nil && pod.Annotations[leaderAnnotationField] == "leader" {
+			leaderPod = pod
+			break
+		}
+	}
+
+	if leaderPod == nil {
+		log.Info("No leader pod found, skipping replication configuration")
+		return nil
+	}
+
+	// Configure replication for all followers
+	return s.configureReplicationForFollowers(ctx, redis, leaderPod)
+}
+
+// cleanupOrphanedStatefulSets removes StatefulSets that are no longer needed
+func (s *StandaloneController) cleanupOrphanedStatefulSets(ctx context.Context, redis *koncachev1alpha1.Redis, expectedStatefulSets []*appsv1.StatefulSet) error {
+	log := logf.FromContext(ctx)
+
+	// Get all existing StatefulSets for this Redis instance
+	existingStatefulSets := &appsv1.StatefulSetList{}
+	listOpts := []client.ListOption{
+		client.InNamespace(redis.Namespace),
+		client.MatchingLabels{
+			"app.kubernetes.io/name":     "redis",
+			"app.kubernetes.io/instance": redis.Name,
+		},
+	}
+
+	err := s.List(ctx, existingStatefulSets, listOpts...)
+	if err != nil {
+		return fmt.Errorf("failed to list existing StatefulSets: %w", err)
+	}
+
+	// Create a map of expected StatefulSet names for quick lookup
 	expectedNames := make(map[string]bool)
 	for _, ss := range expectedStatefulSets {
 		expectedNames[ss.Name] = true
 	}
 
-	// Delete StatefulSets that are not in the expected set
-	for _, statefulSet := range statefulSetList.Items {
-		// Check if this StatefulSet is owned by our Redis instance
-		if !s.isOwnedByRedis(&statefulSet, redis) {
+	// Delete StatefulSets that are no longer expected
+	for i := range existingStatefulSets.Items {
+		ss := &existingStatefulSets.Items[i]
+
+		// Check if this StatefulSet is owned by this Redis instance
+		if !s.isOwnedByRedis(ss, redis) {
 			continue
 		}
 
-		if !expectedNames[statefulSet.Name] {
-			log.Info("Deleting orphaned StatefulSet",
-				statefulSetNameField, statefulSet.Name,
-				statefulSetNamespaceField, statefulSet.Namespace)
-
-			if err := s.Delete(ctx, &statefulSet); err != nil {
-				log.Error(err, "Failed to delete orphaned StatefulSet",
-					statefulSetNameField, statefulSet.Name)
-				return fmt.Errorf("failed to delete orphaned StatefulSet %s: %w", statefulSet.Name, err)
+		// If not in expected list, delete it
+		if !expectedNames[ss.Name] {
+			log.Info("Deleting orphaned StatefulSet", "StatefulSet", ss.Name)
+			if err := s.Delete(ctx, ss); err != nil {
+				log.Error(err, "Failed to delete orphaned StatefulSet", "StatefulSet", ss.Name)
+				// Continue with other StatefulSets even if one fails
 			}
 		}
 	}
@@ -1117,10 +1453,9 @@ func (s *StandaloneController) cleanupOrphanedStatefulSets(ctx context.Context, 
 
 // isOwnedByRedis checks if a StatefulSet is owned by the specified Redis instance
 func (s *StandaloneController) isOwnedByRedis(statefulSet *appsv1.StatefulSet, redis *koncachev1alpha1.Redis) bool {
-	for _, ownerRef := range statefulSet.OwnerReferences {
-		if ownerRef.Kind == "Redis" &&
-			ownerRef.Name == redis.Name &&
-			ownerRef.APIVersion == "koncache.greedykomodo/v1alpha1" {
+	// Check owner references
+	for _, owner := range statefulSet.OwnerReferences {
+		if owner.UID == redis.UID {
 			return true
 		}
 	}
