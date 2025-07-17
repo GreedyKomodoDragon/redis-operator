@@ -1455,7 +1455,13 @@ func (s *StandaloneController) cleanupOrphanedStatefulSets(ctx context.Context, 
 func (s *StandaloneController) isOwnedByRedis(statefulSet *appsv1.StatefulSet, redis *koncachev1alpha1.Redis) bool {
 	// Check owner references
 	for _, owner := range statefulSet.OwnerReferences {
-		if owner.UID == redis.UID {
+		// First try to match by UID (preferred method)
+		if redis.UID != "" && owner.UID == redis.UID {
+			return true
+		}
+
+		// Fallback to match by name and kind (useful for tests where UID might not be set)
+		if owner.Kind == "Redis" && owner.Name == redis.Name {
 			return true
 		}
 	}
