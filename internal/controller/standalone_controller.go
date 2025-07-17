@@ -30,6 +30,7 @@ const (
 	serviceMonitorNameField      = "ServiceMonitor.Name"
 	serviceMonitorNamespaceField = "ServiceMonitor.Namespace"
 	configHashField              = "redis-operator/config-hash"
+	leaderAnnotationField        = "redis-operator/role"
 )
 
 // StandaloneController handles the reconciliation of standalone Redis instances
@@ -324,6 +325,11 @@ func (s *StandaloneController) configMapForRedis(redis *koncachev1alpha1.Redis, 
 func (s *StandaloneController) serviceForRedis(redis *koncachev1alpha1.Redis) *corev1.Service {
 	labels := LabelsForRedis(redis.Name)
 	port := GetRedisPort(redis)
+
+	if redis.Spec.HighAvailability != nil && redis.Spec.HighAvailability.Enabled {
+		// add the leader label for HA Redis
+		labels[leaderAnnotationField] = "leader"
+	}
 
 	// Build service ports
 	var servicePorts []corev1.ServicePort
@@ -1055,7 +1061,7 @@ func (s *StandaloneController) promoteToLeader(ctx context.Context, pod *corev1.
 		pod.Annotations = make(map[string]string)
 	}
 
-	pod.Annotations["redis-operator/role"] = "leader"
+	pod.Annotations[leaderAnnotationField] = "leader"
 	pod.Annotations["redis-operator/promoted-at"] = time.Now().Format(time.RFC3339)
 
 	return s.Update(ctx, pod)
