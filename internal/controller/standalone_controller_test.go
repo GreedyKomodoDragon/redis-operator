@@ -20,6 +20,7 @@ const (
 	testRedisImage70        = "redis:7.0"
 	testConfigHashAnno      = "config-hash"
 	testRedisDataVolume     = "redis-data"
+	testRedisRoleLabel      = "redis-operator/role"
 )
 
 func TestNeedsStatefulSetUpdate(t *testing.T) {
@@ -1668,7 +1669,7 @@ func TestStandaloneServiceConfiguration(t *testing.T) {
 
 	// Verify service doesn't have HA-specific configurations
 	assert.NotContains(t, service.Labels, "redis.io/ha-role", "Standalone service should not have HA role labels")
-	assert.NotContains(t, service.Spec.Selector, "redis.io/role", "Standalone service should not select by role")
+	assert.NotContains(t, service.Spec.Selector, testRedisRoleLabel, "Standalone service should not select by role")
 }
 
 // TestStandaloneBackupConfiguration ensures backup works correctly in standalone mode
@@ -1748,4 +1749,176 @@ func TestStandaloneConfigMapHandling(t *testing.T) {
 	assert.NotContains(t, redisConf, "replica-of", "Standalone config should not have replica settings")
 	assert.NotContains(t, redisConf, "replicaof", "Standalone config should not have replica settings")
 	assert.Contains(t, redisConf, testMaxMemoryPolicy, "Should contain user-specified config")
+}
+
+// TestServiceForRedisHALeaderSelection tests service configuration for HA leader selection
+func TestServiceForRedisHALeaderSelection(t *testing.T) {
+	controller := &StandaloneController{}
+
+	t.Run("Standalone mode - no leader role", func(t *testing.T) {
+		redis := &koncachev1alpha1.Redis{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-standalone",
+				Namespace: "default",
+			},
+			Spec: koncachev1alpha1.RedisSpec{
+				Image: testRedisImage,
+				HighAvailability: &koncachev1alpha1.RedisHighAvailability{
+					Enabled: false,
+				},
+			},
+		}
+
+		service := controller.serviceForRedis(redis)
+
+		assert.Equal(t, "test-standalone", service.Name)
+		assert.Equal(t, "default", service.Namespace)
+		assert.NotContains(t, service.Labels, testRedisRoleLabel,
+			"Standalone service should not have role label")
+		assert.NotContains(t, service.Spec.Selector, testRedisRoleLabel,
+			"Standalone service should not select by role")
+	})
+
+	t.Run("HA mode enabled - should have leader role", func(t *testing.T) {
+		redis := &koncachev1alpha1.Redis{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-ha",
+				Namespace: "default",
+			},
+			Spec: koncachev1alpha1.RedisSpec{
+				Image: testRedisImage,
+				HighAvailability: &koncachev1alpha1.RedisHighAvailability{
+					Enabled:  true,
+					Replicas: 3,
+				},
+			},
+		}
+
+		service := controller.serviceForRedis(redis)
+
+		assert.Equal(t, "test-ha", service.Name)
+		assert.Equal(t, "leader", service.Labels[testRedisRoleLabel],
+			"HA service should have leader role label")
+		assert.Equal(t, "leader", service.Spec.Selector[testRedisRoleLabel],
+			"HA service should select pods with leader role")
+	})
+
+	t.Run("HA nil spec - no leader role, no panic", func(t *testing.T) {
+		redis := &koncachev1alpha1.Redis{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-ha-nil",
+				Namespace: "default",
+			},
+			Spec: koncachev1alpha1.RedisSpec{
+				Image:            testRedisImage,
+				HighAvailability: nil, // This should not cause panic
+			},
+		}
+
+		assert.NotPanics(t, func() {
+			service := controller.serviceForRedis(redis)
+			assert.NotContains(t, service.Labels, testRedisRoleLabel,
+				"Service with nil HA should not have role label")
+		})
+	})
+}
+
+// TestServiceForRedisHAWithMonitoring tests service configuration with monitoring enabled in HA mode
+func TestServiceForRedisHAWithMonitoring(t *testing.T) {
+	controller := &StandaloneController{}
+
+	redis := &koncachev1alpha1.Redis{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ha-monitoring",
+			Namespace: "default",
+		},
+		Spec: koncachev1alpha1.RedisSpec{
+			Image: testRedisImage,
+			HighAvailability: &koncachev1alpha1.RedisHighAvailability{
+				Enabled:  true,
+				Replicas: 3,
+			},
+			Monitoring: koncachev1alpha1.RedisMonitoring{
+				Enabled: true,
+				Exporter: koncachev1alpha1.RedisExporter{
+					Enabled: true,
+					Port:    9121,
+				},
+			},
+		},
+	}
+
+	service := controller.serviceForRedis(redis)
+
+	// Verify HA leader configuration
+	assert.Equal(t, "leader", service.Labels[testRedisRoleLabel],
+		"HA service with monitoring should have leader role label")
+	assert.Equal(t, "leader", service.Spec.Selector[testRedisRoleLabel],
+		"HA service with monitoring should select leader pods")
+
+	// Verify monitoring annotations
+	assert.Equal(t, "true", service.Annotations["prometheus.io/scrape"])
+	assert.Equal(t, "9121", service.Annotations["prometheus.io/port"])
+	assert.Equal(t, "/metrics", service.Annotations["prometheus.io/path"])
+
+	// Verify both Redis and metrics ports are present
+	hasRedisPort := false
+	hasMetricsPort := false
+	for _, port := range service.Spec.Ports {
+		if port.Name == "redis" {
+			hasRedisPort = true
+		}
+		if port.Name == "metrics" && port.Port == 9121 {
+			hasMetricsPort = true
+		}
+	}
+	assert.True(t, hasRedisPort, "Service should have Redis port")
+	assert.True(t, hasMetricsPort, "Service should have metrics port")
+}
+
+// TestServiceForRedisHAWithTLS tests service configuration with TLS enabled in HA mode
+func TestServiceForRedisHAWithTLS(t *testing.T) {
+	controller := &StandaloneController{}
+
+	redis := &koncachev1alpha1.Redis{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ha-tls",
+			Namespace: "default",
+		},
+		Spec: koncachev1alpha1.RedisSpec{
+			Image: testRedisImage,
+			HighAvailability: &koncachev1alpha1.RedisHighAvailability{
+				Enabled:  true,
+				Replicas: 3,
+			},
+			Security: koncachev1alpha1.RedisSecurity{
+				TLS: &koncachev1alpha1.RedisTLS{
+					Enabled:    true,
+					CertSecret: "redis-tls-certs",
+				},
+			},
+		},
+	}
+
+	service := controller.serviceForRedis(redis)
+
+	// Verify HA leader configuration
+	assert.Equal(t, "leader", service.Labels[testRedisRoleLabel],
+		"HA service with TLS should have leader role label")
+	assert.Equal(t, "leader", service.Spec.Selector[testRedisRoleLabel],
+		"HA service with TLS should select leader pods")
+
+	// Verify TLS port is present, regular Redis port should not be
+	hasTLSPort := false
+	hasRegularRedisPort := false
+	for _, port := range service.Spec.Ports {
+		if port.Name == "redis-tls" && port.Port == 6380 {
+			hasTLSPort = true
+		}
+		if port.Name == "redis" && port.Port == 6379 {
+			hasRegularRedisPort = true
+		}
+	}
+	assert.True(t, hasTLSPort, "Service should have TLS port when TLS is enabled")
+	assert.False(t, hasRegularRedisPort, "Service should not have regular Redis port when TLS is enabled")
 }
