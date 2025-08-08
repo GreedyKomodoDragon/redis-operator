@@ -42,10 +42,16 @@ const (
 	defaultRedisVersion         = "7.2"
 	defaultExporterImage        = "oliver006/redis_exporter:latest"
 	defaultExporterPort         = 9121
+	trueBoolString              = "true"
+	configSuffix                = "-config"
+	monitorSuffix               = "-monitor"
+	prometheusGroup             = "monitoring.coreos.com"
 
 	// Error message constants
-	errFailedToDeleteRedis = "failed to delete existing Redis resource: %v"
-	errFailedToCreateRedis = "failed to create Redis resource: %v"
+	errFailedToDeleteRedis     = "failed to delete existing Redis resource: %v"
+	errFailedToCreateRedis     = "failed to create Redis resource: %v"
+	errFailedToCreateDynClient = "failed to create dynamic client: %v"
+	errPodNotFound             = "pod %s not found: %v"
 )
 
 // NewTestContext creates a new test context
@@ -86,7 +92,7 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 	ctx.Step(`^I create a Redis resource with persistent storage:$`, testCtx.createRedisResourceWithPersistentStorage)
 	ctx.Step(`^I create a Redis resource with monitoring:$`, testCtx.createRedisResourceWithMonitoring)
 	ctx.Step(`^I create a Redis resource with custom monitoring port:$`, testCtx.createRedisResourceWithCustomMonitoringPort)
-	ctx.Step(`^I create a Redis resource with monitoring but no ServiceMonitor:$`, testCtx.createRedisResourceWithMonitoringNoServiceMonitor)
+	ctx.Step(`^I create a Redis resource with monitoring but no PodMonitor:$`, testCtx.createRedisResourceWithMonitoringNoPodMonitor)
 	ctx.Step(`^I update the Redis maxMemory from "([^"]*)" to "([^"]*)"$`, testCtx.updateRedisMaxMemory)
 	ctx.Step(`^I delete the Redis resource$`, testCtx.deleteRedisResource)
 
@@ -108,21 +114,21 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 	ctx.Step(`^the Redis ConfigMap should be deleted$`, testCtx.redisConfigMapShouldBeDeleted)
 	ctx.Step(`^the Redis PVC should remain \(for data safety\)$`, testCtx.redisPVCShouldRemain)
 	ctx.Step(`^the Redis StatefulSet should have a monitoring sidecar$`, testCtx.redisStatefulSetShouldHaveMonitoringSidecar)
-	ctx.Step(`^the ServiceMonitor should be created$`, testCtx.serviceMonitorShouldBeCreated)
+	ctx.Step(`^the PodMonitor should be created$`, testCtx.podMonitorShouldBeCreated)
 	ctx.Step(`^the monitoring sidecar should export Redis metrics$`, testCtx.monitoringSidecarShouldExportMetrics)
 	ctx.Step(`^Prometheus should scrape Redis metrics$`, testCtx.prometheusShouldScrapeMetrics)
 	ctx.Step(`^the monitoring sidecar should use port (\d+)$`, testCtx.monitoringSidecarShouldUsePort)
-	ctx.Step(`^the ServiceMonitor should target port (\d+)$`, testCtx.serviceMonitorShouldTargetPort)
+	ctx.Step(`^the PodMonitor should target port (\d+)$`, testCtx.podMonitorShouldTargetPort)
 	ctx.Step(`^metrics should be available on the custom port$`, testCtx.metricsShouldBeAvailableOnCustomPort)
-	ctx.Step(`^no ServiceMonitor should be created$`, testCtx.noServiceMonitorShouldBeCreated)
+	ctx.Step(`^no PodMonitor should be created$`, testCtx.noPodMonitorShouldBeCreated)
 	ctx.Step(`^a Redis instance with monitoring enabled is running$`, testCtx.redisInstanceWithMonitoringEnabledIsRunning)
 	ctx.Step(`^I disable monitoring for the Redis instance$`, testCtx.disableMonitoringForRedisInstance)
 	ctx.Step(`^the monitoring sidecar should be removed$`, testCtx.monitoringSidecarShouldBeRemoved)
-	ctx.Step(`^the ServiceMonitor should be deleted$`, testCtx.serviceMonitorShouldBeDeleted)
+	ctx.Step(`^the PodMonitor should be deleted$`, testCtx.podMonitorShouldBeDeleted)
 	ctx.Step(`^the Redis StatefulSet should be updated$`, testCtx.redisStatefulSetShouldBeUpdated)
 
 	// Cleanup after each scenario
-	ctx.After(func(ctx context.Context, sc *godog.Scenario, err error) (context.Context, error) {
+	ctx.After(func(ctx context.Context, _ *godog.Scenario, _ error) (context.Context, error) {
 		testCtx.cleanup()
 		return ctx, nil
 	})
@@ -141,10 +147,10 @@ func (tc *TestContext) setupKubernetesClient() error {
 	}
 	tc.kubeClient = kubeClient
 
-	// Setup dynamic client for ServiceMonitor operations
+	// Setup dynamic client for PodMonitor operations
 	dynamicClient, err := dynamic.NewForConfig(config)
 	if err != nil {
-		return fmt.Errorf("failed to create dynamic client: %v", err)
+		return fmt.Errorf(errFailedToCreateDynClient, err)
 	}
 	tc.dynamicClient = dynamicClient
 
@@ -229,7 +235,7 @@ func (tc *TestContext) prometheusOperatorIsInstalled() error {
 	// Check if Prometheus operator CRDs exist
 	fmt.Println("Checking for Prometheus operator installation...")
 
-	// Check if ServiceMonitor CRD exists using discovery client
+	// Check if PodMonitor CRD exists using discovery client
 	discovery := tc.kubeClient.Discovery()
 	apiResourceList, err := discovery.ServerResourcesForGroupVersion("monitoring.coreos.com/v1")
 	if err != nil {
@@ -238,20 +244,20 @@ func (tc *TestContext) prometheusOperatorIsInstalled() error {
 		return fmt.Errorf("prometheus operator not installed: %v", err)
 	}
 
-	// Check if ServiceMonitor is in the resource list
-	serviceMonitorFound := false
+	// Check if PodMonitor is in the resource list
+	podMonitorFound := false
 	for _, resource := range apiResourceList.APIResources {
-		if resource.Kind == "ServiceMonitor" {
-			serviceMonitorFound = true
+		if resource.Kind == "PodMonitor" {
+			podMonitorFound = true
 			break
 		}
 	}
 
-	if !serviceMonitorFound {
-		return fmt.Errorf("ServiceMonitor CRD not found, Prometheus operator may not be properly installed")
+	if !podMonitorFound {
+		return fmt.Errorf("PodMonitor CRD not found, Prometheus operator may not be properly installed")
 	}
 
-	fmt.Println("Prometheus operator is installed and ServiceMonitor CRD is available")
+	fmt.Println("Prometheus operator is installed and PodMonitor CRD is available")
 	return nil
 }
 
@@ -391,7 +397,7 @@ func (tc *TestContext) redisServiceShouldBeCreated() error {
 
 func (tc *TestContext) redisConfigMapShouldBeCreated() error {
 	// Wait for ConfigMap to be created
-	return tc.waitForResource("ConfigMap", tc.getLastRedisName()+"-config")
+	return tc.waitForResource("ConfigMap", tc.getLastRedisName()+configSuffix)
 }
 
 func (tc *TestContext) redisPodShouldBeRunning() error {
@@ -399,8 +405,11 @@ func (tc *TestContext) redisPodShouldBeRunning() error {
 	redisName := tc.getLastRedisName()
 	podName := redisName + "-0" // StatefulSet pod naming convention
 
-	return wait.PollImmediate(time.Second*3, time.Second*30, func() (bool, error) {
-		pod, err := tc.kubeClient.CoreV1().Pods(tc.namespace).Get(context.TODO(), podName, metav1.GetOptions{})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
+	defer cancel()
+
+	return wait.PollUntilContextTimeout(ctx, time.Second*3, time.Second*30, true, func(ctx context.Context) (bool, error) {
+		pod, err := tc.kubeClient.CoreV1().Pods(tc.namespace).Get(ctx, podName, metav1.GetOptions{})
 		if err != nil {
 			fmt.Printf("Pod %s not found yet, retrying...\n", podName)
 			return false, nil
@@ -418,16 +427,19 @@ func (tc *TestContext) redisPodShouldBeRunning() error {
 
 // Helper functions
 func (tc *TestContext) waitForResource(resourceType, name string) error {
-	return wait.PollImmediate(time.Second*5, time.Minute*2, func() (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*2)
+	defer cancel()
+
+	return wait.PollUntilContextTimeout(ctx, time.Second*5, time.Minute*2, true, func(ctx context.Context) (bool, error) {
 		switch resourceType {
 		case "StatefulSet":
-			_, err := tc.kubeClient.AppsV1().StatefulSets(tc.namespace).Get(context.TODO(), name, metav1.GetOptions{})
+			_, err := tc.kubeClient.AppsV1().StatefulSets(tc.namespace).Get(ctx, name, metav1.GetOptions{})
 			return err == nil, nil
 		case "Service":
-			_, err := tc.kubeClient.CoreV1().Services(tc.namespace).Get(context.TODO(), name, metav1.GetOptions{})
+			_, err := tc.kubeClient.CoreV1().Services(tc.namespace).Get(ctx, name, metav1.GetOptions{})
 			return err == nil, nil
 		case "ConfigMap":
-			_, err := tc.kubeClient.CoreV1().ConfigMaps(tc.namespace).Get(context.TODO(), name, metav1.GetOptions{})
+			_, err := tc.kubeClient.CoreV1().ConfigMaps(tc.namespace).Get(ctx, name, metav1.GetOptions{})
 			return err == nil, nil
 		default:
 			return false, fmt.Errorf("unknown resource type: %s", resourceType)
@@ -457,7 +469,7 @@ func (tc *TestContext) cleanup() {
 	// Clean up created resources
 	if tc.kubeClient != nil {
 		for _, secret := range tc.createdSecrets {
-			tc.kubeClient.CoreV1().Secrets(tc.namespace).Delete(
+			_ = tc.kubeClient.CoreV1().Secrets(tc.namespace).Delete(
 				context.TODO(), secret.Name, metav1.DeleteOptions{})
 		}
 	}
@@ -478,11 +490,9 @@ func parseTable(table *godog.Table) map[string]string {
 	return config
 }
 
-func parsePort(portStr string) int32 {
+func parsePort(_ string) int32 {
 	// Simple port parsing - in real implementation, handle errors
-	if portStr == "6379" {
-		return 6379
-	}
+	// For now, always return the default Redis port
 	return 6379
 }
 
@@ -628,8 +638,8 @@ func (tc *TestContext) createRedisResourceWithMonitoring(table *godog.Table) err
 				},
 			},
 			Monitoring: koncachev1alpha1.RedisMonitoring{
-				Enabled:        config["monitoringEnabled"] == "true",
-				ServiceMonitor: true,
+				Enabled:    config["monitoringEnabled"] == trueBoolString,
+				PodMonitor: true,
 				Exporter: koncachev1alpha1.RedisExporter{
 					Enabled: true,
 					Image:   getStringOrDefault(config["exporterImage"], defaultExporterImage),
@@ -701,8 +711,8 @@ func (tc *TestContext) createRedisResourceWithCustomMonitoringPort(table *godog.
 				},
 			},
 			Monitoring: koncachev1alpha1.RedisMonitoring{
-				Enabled:        config["monitoringEnabled"] == "true",
-				ServiceMonitor: true,
+				Enabled:    config["monitoringEnabled"] == "true",
+				PodMonitor: true,
 				Exporter: koncachev1alpha1.RedisExporter{
 					Enabled: true,
 					Image:   "oliver006/redis_exporter:latest",
@@ -745,7 +755,7 @@ func (tc *TestContext) createRedisResourceWithCustomMonitoringPort(table *godog.
 	return nil
 }
 
-func (tc *TestContext) createRedisResourceWithMonitoringNoServiceMonitor(table *godog.Table) error {
+func (tc *TestContext) createRedisResourceWithMonitoringNoPodMonitor(table *godog.Table) error {
 	config := parseTable(table)
 
 	redis := &koncachev1alpha1.Redis{
@@ -765,8 +775,8 @@ func (tc *TestContext) createRedisResourceWithMonitoringNoServiceMonitor(table *
 				},
 			},
 			Monitoring: koncachev1alpha1.RedisMonitoring{
-				Enabled:        config["monitoringEnabled"] == "true",
-				ServiceMonitor: false,
+				Enabled:    config["monitoringEnabled"] == "true",
+				PodMonitor: false,
 				Exporter: koncachev1alpha1.RedisExporter{
 					Enabled: true,
 					Image:   config["exporterImage"],
@@ -809,51 +819,7 @@ func (tc *TestContext) createRedisResourceWithMonitoringNoServiceMonitor(table *
 	return nil
 }
 
-func (tc *TestContext) redisInstanceWithMonitoringIsRunning(name string) error {
-	if testing.Short() {
-		// In short mode, assume Redis instance with monitoring is running
-		return nil
-	}
-
-	// Create a Redis instance with monitoring enabled
-	redis := &koncachev1alpha1.Redis{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: tc.namespace,
-		},
-		Spec: koncachev1alpha1.RedisSpec{
-			Image:   defaultRedisImage,
-			Version: defaultRedisVersion,
-			Monitoring: koncachev1alpha1.RedisMonitoring{
-				Enabled:        true,
-				ServiceMonitor: true,
-				Exporter: koncachev1alpha1.RedisExporter{
-					Enabled: true,
-					Image:   defaultExporterImage,
-					Port:    defaultExporterPort,
-				},
-			},
-		},
-	}
-
-	// Delete existing resource if it exists
-	_ = tc.Client.Delete(context.TODO(), redis)
-	time.Sleep(2 * time.Second)
-
-	// Create the Redis instance
-	if err := tc.Client.Create(context.TODO(), redis); err != nil {
-		return fmt.Errorf(errFailedToCreateRedis, err)
-	}
-
-	// Store in local cache
-	tc.redisResources[name] = redis
-	tc.lastRedisName = name
-
-	// Wait for it to be running
-	return tc.redisInstanceIsRunning(name)
-}
-
-func (tc *TestContext) updateRedisMaxMemory(oldValue, newValue string) error {
+func (tc *TestContext) updateRedisMaxMemory(_, newValue string) error {
 	if testing.Short() {
 		// In short mode, assume update succeeded
 		return nil
@@ -910,9 +876,12 @@ func (tc *TestContext) deleteRedisResource() error {
 	delete(tc.redisResources, redisName)
 
 	// Wait for resource to be deleted
-	return wait.Poll(2*time.Second, 30*time.Second, func() (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	return wait.PollUntilContextTimeout(ctx, 2*time.Second, 30*time.Second, true, func(ctx context.Context) (bool, error) {
 		redis := &koncachev1alpha1.Redis{}
-		err := tc.Client.Get(context.TODO(), client.ObjectKey{
+		err := tc.Client.Get(ctx, client.ObjectKey{
 			Name:      redisName,
 			Namespace: tc.namespace,
 		}, redis)
@@ -953,7 +922,7 @@ func (tc *TestContext) redisConfigMapShouldContainCustomConfig() error {
 	}
 
 	redisName := tc.getLastRedisName()
-	configMapName := redisName + "-config"
+	configMapName := redisName + configSuffix
 
 	// Check that ConfigMap exists with custom configuration
 	configMap, err := tc.kubeClient.CoreV1().ConfigMaps(tc.namespace).Get(context.TODO(), configMapName, metav1.GetOptions{})
@@ -1182,9 +1151,12 @@ func (tc *TestContext) redisStatefulSetShouldHaveMonitoringSidecar() error {
 	redisName := tc.getLastRedisName()
 
 	// Wait for StatefulSet to exist and check for monitoring sidecar
-	return wait.PollImmediate(time.Second*3, time.Second*30, func() (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
+	defer cancel()
+
+	return wait.PollUntilContextTimeout(ctx, time.Second*3, time.Second*30, true, func(ctx context.Context) (bool, error) {
 		statefulSet, err := tc.kubeClient.AppsV1().StatefulSets(tc.namespace).Get(
-			context.TODO(), redisName, metav1.GetOptions{})
+			ctx, redisName, metav1.GetOptions{})
 		if err != nil {
 			return false, nil // StatefulSet doesn't exist yet
 		}
@@ -1210,24 +1182,27 @@ func (tc *TestContext) redisStatefulSetShouldHaveMonitoringSidecar() error {
 	})
 }
 
-func (tc *TestContext) serviceMonitorShouldBeCreated() error {
+func (tc *TestContext) podMonitorShouldBeCreated() error {
 	if testing.Short() {
-		// In short mode, assume ServiceMonitor is created
+		// In short mode, assume PodMonitor is created
 		return nil
 	}
 
 	redisName := tc.getLastRedisName()
-	serviceMonitorName := redisName + "-monitor" // Redis operator uses -monitor suffix
+	podMonitorName := redisName + "-monitor" // Redis operator uses -monitor suffix
 
-	// Define the ServiceMonitor GVR
-	serviceMonitorGVR := schema.GroupVersionResource{
+	// Define the PodMonitor GVR
+	podMonitorGVR := schema.GroupVersionResource{
 		Group:    "monitoring.coreos.com",
 		Version:  "v1",
-		Resource: "servicemonitors",
+		Resource: "podmonitors",
 	}
 
-	// Wait for ServiceMonitor to be created
-	return wait.PollImmediate(time.Second*3, time.Minute*1, func() (bool, error) {
+	// Wait for PodMonitor to be created
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*1)
+	defer cancel()
+
+	return wait.PollUntilContextTimeout(ctx, time.Second*3, time.Minute*1, true, func(ctx context.Context) (bool, error) {
 		if tc.dynamicClient == nil {
 			// If no dynamic client, try to create one
 			config, err := clientcmd.BuildConfigFromFlags("", "")
@@ -1240,17 +1215,17 @@ func (tc *TestContext) serviceMonitorShouldBeCreated() error {
 			}
 		}
 
-		// Try to get the ServiceMonitor
-		_, err := tc.dynamicClient.Resource(serviceMonitorGVR).Namespace(tc.namespace).Get(
-			context.TODO(), serviceMonitorName, metav1.GetOptions{})
+		// Try to get the PodMonitor
+		_, err := tc.dynamicClient.Resource(podMonitorGVR).Namespace(tc.namespace).Get(
+			ctx, podMonitorName, metav1.GetOptions{})
 		if err != nil {
 			if errors.IsNotFound(err) {
-				return false, nil // ServiceMonitor doesn't exist yet
+				return false, nil // PodMonitor doesn't exist yet
 			}
 			return false, err // Some other error
 		}
 
-		return true, nil // ServiceMonitor exists
+		return true, nil // PodMonitor exists
 	})
 }
 
@@ -1264,8 +1239,11 @@ func (tc *TestContext) monitoringSidecarShouldExportMetrics() error {
 	podName := redisName + "-0" // StatefulSet pod naming convention
 
 	// Check that the monitoring sidecar is exposing metrics endpoint
-	return wait.PollImmediate(time.Second*3, time.Second*20, func() (bool, error) {
-		pod, err := tc.kubeClient.CoreV1().Pods(tc.namespace).Get(context.TODO(), podName, metav1.GetOptions{})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*20)
+	defer cancel()
+
+	return wait.PollUntilContextTimeout(ctx, time.Second*3, time.Second*20, true, func(ctx context.Context) (bool, error) {
+		pod, err := tc.kubeClient.CoreV1().Pods(tc.namespace).Get(ctx, podName, metav1.GetOptions{})
 		if err != nil {
 			return false, nil
 		}
@@ -1304,8 +1282,11 @@ func (tc *TestContext) prometheusShouldScrapeMetrics() error {
 	podName := redisName + "-0" // StatefulSet pod naming convention
 
 	// Check that the exporter is accessible and responding
-	return wait.PollImmediate(time.Second*3, time.Second*20, func() (bool, error) {
-		pod, err := tc.kubeClient.CoreV1().Pods(tc.namespace).Get(context.TODO(), podName, metav1.GetOptions{})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*20)
+	defer cancel()
+
+	return wait.PollUntilContextTimeout(ctx, time.Second*3, time.Second*20, true, func(ctx context.Context) (bool, error) {
+		pod, err := tc.kubeClient.CoreV1().Pods(tc.namespace).Get(ctx, podName, metav1.GetOptions{})
 		if err != nil {
 			return false, nil
 		}
@@ -1329,8 +1310,11 @@ func (tc *TestContext) monitoringSidecarShouldUsePort(port int) error {
 	redisName := tc.getLastRedisName()
 	podName := redisName + "-0" // StatefulSet pod naming convention
 
-	return wait.PollImmediate(time.Second*3, time.Second*20, func() (bool, error) {
-		pod, err := tc.kubeClient.CoreV1().Pods(tc.namespace).Get(context.TODO(), podName, metav1.GetOptions{})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*20)
+	defer cancel()
+
+	return wait.PollUntilContextTimeout(ctx, time.Second*3, time.Second*20, true, func(ctx context.Context) (bool, error) {
+		pod, err := tc.kubeClient.CoreV1().Pods(tc.namespace).Get(ctx, podName, metav1.GetOptions{})
 		if err != nil {
 			return false, nil
 		}
@@ -1354,23 +1338,23 @@ func (tc *TestContext) hasExporterUsingPort(pod corev1.Pod, expectedPort int) bo
 	return false
 }
 
-func (tc *TestContext) serviceMonitorShouldTargetPort(port int) error {
+func (tc *TestContext) podMonitorShouldTargetPort(port int) error {
 	if testing.Short() {
-		// In short mode, assume ServiceMonitor targets correct port
+		// In short mode, assume PodMonitor targets correct port
 		return nil
 	}
 
 	redisName := tc.getLastRedisName()
-	serviceMonitorName := redisName + "-monitor" // Redis operator uses -monitor suffix
+	podMonitorName := redisName + "-monitor" // Redis operator uses -monitor suffix
 
-	// Define the ServiceMonitor GVR
-	serviceMonitorGVR := schema.GroupVersionResource{
+	// Define the PodMonitor GVR
+	podMonitorGVR := schema.GroupVersionResource{
 		Group:    "monitoring.coreos.com",
 		Version:  "v1",
-		Resource: "servicemonitors",
+		Resource: "podmonitors",
 	}
 
-	// Get the ServiceMonitor and check its port configuration
+	// Get the PodMonitor and check its port configuration
 	if tc.dynamicClient == nil {
 		// If no dynamic client, try to create one
 		config, err := clientcmd.BuildConfigFromFlags("", "")
@@ -1383,20 +1367,20 @@ func (tc *TestContext) serviceMonitorShouldTargetPort(port int) error {
 		}
 	}
 
-	// Get the ServiceMonitor
-	serviceMonitor, err := tc.dynamicClient.Resource(serviceMonitorGVR).Namespace(tc.namespace).Get(
-		context.TODO(), serviceMonitorName, metav1.GetOptions{})
+	// Get the PodMonitor
+	podMonitor, err := tc.dynamicClient.Resource(podMonitorGVR).Namespace(tc.namespace).Get(
+		context.TODO(), podMonitorName, metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf("ServiceMonitor %s not found: %v", serviceMonitorName, err)
+		return fmt.Errorf("PodMonitor %s not found: %v", podMonitorName, err)
 	}
 
-	// Check the port in the endpoints - for testing, just verify ServiceMonitor exists
-	if serviceMonitor.Object == nil {
-		return fmt.Errorf("ServiceMonitor object is nil")
+	// Check the port in the endpoints - for testing, just verify PodMonitor exists
+	if podMonitor.Object == nil {
+		return fmt.Errorf("PodMonitor object is nil")
 	}
 
-	// In a real implementation, you would parse the spec.endpoints to check the port
-	// For now, just verify the ServiceMonitor exists
+	// In a real implementation, you would parse the spec.podMetricsEndpoints to check the port
+	// For now, just verify the PodMonitor exists
 	_ = port
 
 	return nil
@@ -1422,31 +1406,47 @@ func (tc *TestContext) metricsShouldBeAvailableOnCustomPort() error {
 
 // Missing step implementations for monitoring scenarios
 
-func (tc *TestContext) noServiceMonitorShouldBeCreated() error {
+func (tc *TestContext) noPodMonitorShouldBeCreated() error {
 	if testing.Short() {
-		// In short mode, assume no ServiceMonitor is created
+		// In short mode, assume no PodMonitor is created
 		return nil
 	}
 
 	redisName := tc.getLastRedisName()
+	podMonitorName := redisName + "-monitor"
 
-	// Wait a moment to ensure ServiceMonitor would have been created if it was going to be
+	// Define the PodMonitor GVR
+	podMonitorGVR := schema.GroupVersionResource{
+		Group:    "monitoring.coreos.com",
+		Version:  "v1",
+		Resource: "podmonitors",
+	}
+
+	// Wait a moment to ensure PodMonitor would have been created if it was going to be
 	time.Sleep(time.Second * 5)
 
-	// Check that no ServiceMonitor was created by looking for a specific service
-	// that would be associated with the ServiceMonitor
-	services, err := tc.kubeClient.CoreV1().Services(tc.namespace).List(context.TODO(), metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("app=%s,prometheus-monitor=true", redisName),
-	})
+	if tc.dynamicClient == nil {
+		config, err := clientcmd.BuildConfigFromFlags("", "")
+		if err != nil {
+			return fmt.Errorf("failed to build config: %v", err)
+		}
+		tc.dynamicClient, err = dynamic.NewForConfig(config)
+		if err != nil {
+			return fmt.Errorf("failed to create dynamic client: %v", err)
+		}
+	}
+
+	// Check that no PodMonitor exists
+	_, err := tc.dynamicClient.Resource(podMonitorGVR).Namespace(tc.namespace).Get(
+		context.TODO(), podMonitorName, metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to list services: %v", err)
+		if errors.IsNotFound(err) {
+			return nil // PodMonitor doesn't exist, as expected
+		}
+		return fmt.Errorf("error checking PodMonitor: %v", err)
 	}
 
-	if len(services.Items) > 0 {
-		return fmt.Errorf("found ServiceMonitor-related service when none should exist")
-	}
-
-	return nil
+	return fmt.Errorf("found PodMonitor %s when none should exist", podMonitorName)
 }
 
 func (tc *TestContext) redisInstanceWithMonitoringEnabledIsRunning() error {
@@ -1468,8 +1468,8 @@ func (tc *TestContext) redisInstanceWithMonitoringEnabledIsRunning() error {
 				},
 			},
 			Monitoring: koncachev1alpha1.RedisMonitoring{
-				Enabled:        true,
-				ServiceMonitor: true,
+				Enabled:    true,
+				PodMonitor: true,
 				Exporter: koncachev1alpha1.RedisExporter{
 					Enabled: true,
 					Image:   "oliver006/redis_exporter:latest",
@@ -1518,10 +1518,13 @@ func (tc *TestContext) redisInstanceWithMonitoringEnabledIsRunning() error {
 
 func (tc *TestContext) waitForRedisToBeRunning(redisName string) error {
 	// Wait for StatefulSet to be ready with longer timeout
-	return wait.PollImmediate(time.Second*5, time.Minute*3, func() (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*3)
+	defer cancel()
+
+	return wait.PollUntilContextTimeout(ctx, time.Second*5, time.Minute*3, true, func(ctx context.Context) (bool, error) {
 		// First check if StatefulSet exists and is ready
 		statefulSet, err := tc.kubeClient.AppsV1().StatefulSets(tc.namespace).Get(
-			context.TODO(), redisName, metav1.GetOptions{})
+			ctx, redisName, metav1.GetOptions{})
 		if err != nil {
 			return false, nil // StatefulSet doesn't exist yet
 		}
@@ -1533,7 +1536,7 @@ func (tc *TestContext) waitForRedisToBeRunning(redisName string) error {
 
 		// Also check if the pod is actually running
 		podName := redisName + "-0"
-		pod, err := tc.kubeClient.CoreV1().Pods(tc.namespace).Get(context.TODO(), podName, metav1.GetOptions{})
+		pod, err := tc.kubeClient.CoreV1().Pods(tc.namespace).Get(ctx, podName, metav1.GetOptions{})
 		if err != nil {
 			return false, nil // Pod doesn't exist yet
 		}
@@ -1563,7 +1566,7 @@ func (tc *TestContext) disableMonitoringForRedisInstance() error {
 		fmt.Printf("Disabling monitoring for Redis instance: %s (short mode)\n", redisName)
 		if redis, exists := tc.redisResources[redisName]; exists {
 			redis.Spec.Monitoring.Enabled = false
-			redis.Spec.Monitoring.ServiceMonitor = false
+			redis.Spec.Monitoring.PodMonitor = false
 			redis.Spec.Monitoring.Exporter.Enabled = false
 		}
 		return nil
@@ -1584,7 +1587,7 @@ func (tc *TestContext) disableMonitoringForRedisInstance() error {
 
 		// Update the monitoring configuration
 		currentRedis.Spec.Monitoring.Enabled = false
-		currentRedis.Spec.Monitoring.ServiceMonitor = false
+		currentRedis.Spec.Monitoring.PodMonitor = false
 		currentRedis.Spec.Monitoring.Exporter.Enabled = false
 
 		// Update the Redis resource using the current version
@@ -1604,9 +1607,12 @@ func (tc *TestContext) monitoringSidecarShouldBeRemoved() error {
 	redisName := testRedisWithMonitoringName
 
 	// Wait for StatefulSet to be updated and monitoring sidecar to be removed
-	return wait.PollImmediate(time.Second*5, time.Minute*3, func() (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*3)
+	defer cancel()
+
+	return wait.PollUntilContextTimeout(ctx, time.Second*5, time.Minute*3, true, func(ctx context.Context) (bool, error) {
 		statefulSet, err := tc.kubeClient.AppsV1().StatefulSets(tc.namespace).Get(
-			context.TODO(), redisName, metav1.GetOptions{})
+			ctx, redisName, metav1.GetOptions{})
 		if err != nil {
 			return false, err
 		}
@@ -1625,26 +1631,25 @@ func (tc *TestContext) monitoringSidecarShouldBeRemoved() error {
 	})
 }
 
-func (tc *TestContext) serviceMonitorShouldBeDeleted() error {
+func (tc *TestContext) podMonitorShouldBeDeleted() error {
 	if testing.Short() {
-		// In short mode, assume ServiceMonitor is deleted
+		// In short mode, assume PodMonitor is deleted
 		return nil
 	}
 
 	redisName := testRedisWithMonitoringName
-	serviceMonitorName := redisName + "-monitor" // Redis operator uses -monitor suffix
+	podMonitorName := redisName + "-monitor" // Redis operator uses -monitor suffix
 
-	// Define the ServiceMonitor GVR
-	serviceMonitorGVR := schema.GroupVersionResource{
+	// Define the PodMonitor GVR
+	podMonitorGVR := schema.GroupVersionResource{
 		Group:    "monitoring.coreos.com",
 		Version:  "v1",
-		Resource: "servicemonitors",
+		Resource: "podmonitors",
 	}
 
-	// Wait for ServiceMonitor to be deleted
-	return wait.PollImmediate(time.Second*3, time.Minute*1, func() (bool, error) {
+	// Wait for PodMonitor to be deleted
+	return wait.PollImmediateWithContext(context.Background(), time.Second*3, time.Minute*1, wait.ConditionFunc(func() (bool, error) {
 		if tc.dynamicClient == nil {
-			// If no dynamic client, try to create one
 			config, err := clientcmd.BuildConfigFromFlags("", "")
 			if err != nil {
 				return false, nil
@@ -1654,28 +1659,27 @@ func (tc *TestContext) serviceMonitorShouldBeDeleted() error {
 				return false, nil
 			}
 		}
-
-		// Try to get the ServiceMonitor
-		_, err := tc.dynamicClient.Resource(serviceMonitorGVR).Namespace(tc.namespace).Get(
-			context.TODO(), serviceMonitorName, metav1.GetOptions{})
+		_, err := tc.dynamicClient.Resource(podMonitorGVR).Namespace(tc.namespace).Get(context.TODO(), podMonitorName, metav1.GetOptions{})
 		if err != nil {
 			if errors.IsNotFound(err) {
-				return true, nil // ServiceMonitor is deleted as expected
+				return true, nil
 			}
-			return false, err // Some other error
+			return false, err
 		}
-
-		return false, nil // ServiceMonitor still exists
-	})
+		return false, nil
+	}).WithContext())
 }
 
 func (tc *TestContext) redisStatefulSetShouldBeUpdated() error {
 	redisName := testRedisWithMonitoringName
 
 	// Check that the StatefulSet has been updated (generation incremented)
-	return wait.PollImmediate(time.Second*5, time.Minute*2, func() (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*2)
+	defer cancel()
+
+	return wait.PollUntilContextTimeout(ctx, time.Second*5, time.Minute*2, true, func(ctx context.Context) (bool, error) {
 		statefulSet, err := tc.kubeClient.AppsV1().StatefulSets(tc.namespace).Get(
-			context.TODO(), redisName, metav1.GetOptions{})
+			ctx, redisName, metav1.GetOptions{})
 		if err != nil {
 			return false, err
 		}

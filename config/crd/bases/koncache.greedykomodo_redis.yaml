@@ -2613,11 +2613,11 @@ spec:
                     required:
                     - enabled
                     type: object
+                  podMonitor:
+                    description: PodMonitor specifies whether to create a PodMonitor
+                    type: boolean
                   prometheusRule:
                     description: PrometheusRule specifies whether to create PrometheusRule
-                    type: boolean
-                  serviceMonitor:
-                    description: ServiceMonitor specifies whether to create a ServiceMonitor
                     type: boolean
                 required:
                 - enabled

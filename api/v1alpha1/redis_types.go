@@ -450,8 +450,8 @@ type RedisMonitoring struct {
 	// Enabled specifies whether monitoring is enabled
 	Enabled bool `json:"enabled"`
 
-	// ServiceMonitor specifies whether to create a ServiceMonitor
-	ServiceMonitor bool `json:"serviceMonitor,omitempty"`
+	// PodMonitor specifies whether to create a PodMonitor
+	PodMonitor bool `json:"podMonitor,omitempty"`
 
 	// PrometheusRule specifies whether to create PrometheusRule
 	PrometheusRule bool `json:"prometheusRule,omitempty"`

@@ -7,7 +7,7 @@ operator:
   # Image configuration
   image:
     repository: greedykomodo/redis-operator
-    tag: latest
+    tag: v0.0.51
     pullPolicy: IfNotPresent
   
   # Resource limits and requests

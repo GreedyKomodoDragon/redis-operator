@@ -18,7 +18,7 @@ func init() {
 	godog.BindCommandLineFlags("godog.", &opts)
 }
 
-func TestMain(m *testing.M) {
+func TestMain(_ *testing.M) {
 	flag.Parse()
 
 	// Skip cucumber tests in short mode
