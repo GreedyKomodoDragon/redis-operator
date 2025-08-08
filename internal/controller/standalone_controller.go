@@ -27,14 +27,14 @@ import (
 )
 
 const (
-	statefulSetNameField         = "StatefulSet.Name"
-	statefulSetNamespaceField    = "StatefulSet.Namespace"
-	configMapNameField           = "ConfigMap.Name"
-	configMapNamespaceField      = "ConfigMap.Namespace"
-	serviceMonitorNameField      = "ServiceMonitor.Name"
-	serviceMonitorNamespaceField = "ServiceMonitor.Namespace"
-	configHashField              = "redis-operator/config-hash"
-	leaderAnnotationField        = "redis-operator/role"
+	statefulSetNameField      = "StatefulSet.Name"
+	statefulSetNamespaceField = "StatefulSet.Namespace"
+	configMapNameField        = "ConfigMap.Name"
+	configMapNamespaceField   = "ConfigMap.Namespace"
+	podMonitorNameField       = "PodMonitor.Name"
+	podMonitorNamespaceField  = "PodMonitor.Namespace"
+	configHashField           = "redis-operator/config-hash"
+	leaderAnnotationField     = "redis-operator/role"
 )
 
 // StandaloneController handles the reconciliation of standalone Redis instances
@@ -73,16 +73,16 @@ func (s *StandaloneController) Reconcile(ctx context.Context, redis *koncachev1a
 		return ctrl.Result{}, err
 	}
 
-	// Create or update ServiceMonitor if monitoring is enabled
+	// Create or update PodMonitor if monitoring is enabled
 	if IsMonitoringEnabled(redis) {
-		if err := s.reconcileServiceMonitor(ctx, redis); err != nil {
-			log.Error(err, "Failed to reconcile ServiceMonitor")
+		if err := s.reconcilePodMonitor(ctx, redis); err != nil {
+			log.Error(err, "Failed to reconcile PodMonitor")
 			return ctrl.Result{}, err
 		}
 	} else {
-		// Clean up ServiceMonitor if it exists but monitoring is disabled
-		if err := s.cleanupServiceMonitor(ctx, redis); err != nil {
-			log.Error(err, "Failed to cleanup ServiceMonitor")
+		// Clean up PodMonitor if it exists but monitoring is disabled
+		if err := s.cleanupPodMonitor(ctx, redis); err != nil {
+			log.Error(err, "Failed to cleanup PodMonitor")
 			return ctrl.Result{}, err
 		}
 	}
@@ -143,66 +143,68 @@ func (s *StandaloneController) Reconcile(ctx context.Context, redis *koncachev1a
 	return ctrl.Result{}, nil
 }
 
-func (s *StandaloneController) reconcileServiceMonitor(ctx context.Context, redis *koncachev1alpha1.Redis) error {
+func (s *StandaloneController) reconcilePodMonitor(ctx context.Context, redis *koncachev1alpha1.Redis) error {
 	log := logf.FromContext(ctx)
 
-	serviceMonitor := s.serviceMonitorForRedis(redis)
-	if err := controllerutil.SetControllerReference(redis, serviceMonitor, s.Scheme); err != nil {
+	podMonitor := s.podMonitorForRedis(redis)
+	if err := controllerutil.SetControllerReference(redis, podMonitor, s.Scheme); err != nil {
 		return err
 	}
 
-	foundServiceMonitor := &monitoringv1.ServiceMonitor{}
-	err := s.Get(ctx, types.NamespacedName{Name: serviceMonitor.Name, Namespace: serviceMonitor.Namespace}, foundServiceMonitor)
+	foundPodMonitor := &monitoringv1.PodMonitor{}
+	err := s.Get(ctx, types.NamespacedName{Name: podMonitor.Name, Namespace: podMonitor.Namespace}, foundPodMonitor)
 	if err != nil && errors.IsNotFound(err) {
-		log.Info("Creating a new ServiceMonitor", serviceMonitorNamespaceField, serviceMonitor.Namespace, serviceMonitorNameField, serviceMonitor.Name)
-		return s.Create(ctx, serviceMonitor)
+		log.Info("Creating a new PodMonitor", podMonitorNamespaceField, podMonitor.Namespace, podMonitorNameField, podMonitor.Name)
+		return s.Create(ctx, podMonitor)
 	}
 
 	return err
 }
 
-func (s *StandaloneController) cleanupServiceMonitor(ctx context.Context, redis *koncachev1alpha1.Redis) error {
+func (s *StandaloneController) cleanupPodMonitor(ctx context.Context, redis *koncachev1alpha1.Redis) error {
 	log := logf.FromContext(ctx)
-	serviceMonitor := &monitoringv1.ServiceMonitor{
+	podMonitor := &monitoringv1.PodMonitor{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      redis.Name + "-monitor",
 			Namespace: redis.Namespace,
 		},
 	}
-	err := s.Get(ctx, types.NamespacedName{Name: serviceMonitor.Name, Namespace: serviceMonitor.Namespace}, serviceMonitor)
+	err := s.Get(ctx, types.NamespacedName{Name: podMonitor.Name, Namespace: podMonitor.Namespace}, podMonitor)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			log.Info("ServiceMonitor not found, nothing to clean up", serviceMonitorNamespaceField, serviceMonitor.Namespace, serviceMonitorNameField, serviceMonitor.Name)
+			log.Info("PodMonitor not found, nothing to clean up", podMonitorNamespaceField, podMonitor.Namespace, podMonitorNameField, podMonitor.Name)
 			return nil
 		}
-		log.Error(err, "Failed to get ServiceMonitor for cleanup", serviceMonitorNamespaceField, serviceMonitor.Namespace, serviceMonitorNameField, serviceMonitor.Name)
+		log.Error(err, "Failed to get PodMonitor for cleanup", podMonitorNamespaceField, podMonitor.Namespace, podMonitorNameField, podMonitor.Name)
 		return err
 	}
 
-	log.Info("Deleting ServiceMonitor", serviceMonitorNamespaceField, serviceMonitor.Namespace, serviceMonitorNameField, serviceMonitor.Name)
-	return s.Delete(ctx, serviceMonitor)
+	log.Info("Deleting PodMonitor", podMonitorNamespaceField, podMonitor.Namespace, podMonitorNameField, podMonitor.Name)
+	return s.Delete(ctx, podMonitor)
 }
 
-func (s *StandaloneController) serviceMonitorForRedis(redis *koncachev1alpha1.Redis) *monitoringv1.ServiceMonitor {
+func (s *StandaloneController) podMonitorForRedis(redis *koncachev1alpha1.Redis) *monitoringv1.PodMonitor {
 	labels := LabelsForRedis(redis.Name)
-	return &monitoringv1.ServiceMonitor{
+	port := "metrics"
+
+	return &monitoringv1.PodMonitor{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      redis.Name + "-monitor",
+			Name:      redis.Name + "-podmonitor",
 			Namespace: redis.Namespace,
 			Labels:    labels,
 		},
-		Spec: monitoringv1.ServiceMonitorSpec{
+		Spec: monitoringv1.PodMonitorSpec{
 			Selector: metav1.LabelSelector{
 				MatchLabels: labels,
 			},
-			Endpoints: []monitoringv1.Endpoint{
-				{
-					Port:     "metrics",
-					Interval: "30s",
-				},
-			},
 			NamespaceSelector: monitoringv1.NamespaceSelector{
 				MatchNames: []string{redis.Namespace},
+			},
+			PodMetricsEndpoints: []monitoringv1.PodMetricsEndpoint{
+				{
+					Port:     &port,
+					Interval: "30s",
+				},
 			},
 		},
 	}
