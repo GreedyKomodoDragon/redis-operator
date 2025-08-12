@@ -66,8 +66,8 @@ func BuildTLSVolumeMounts(redis *koncachev1alpha1.Redis) []corev1.VolumeMount {
 		}
 
 		// CA certificate volume mount (if different from cert secret)
-		if redis.Spec.Security.TLS.CASecret != "" &&
-			redis.Spec.Security.TLS.CASecret != redis.Spec.Security.TLS.CertSecret {
+		if redis.Spec.Security.TLS.CASecret != nil && redis.Spec.Security.TLS.CASecret.Name != "" &&
+			redis.Spec.Security.TLS.CASecret.Name != redis.Spec.Security.TLS.CertSecret {
 			volumeMounts = append(volumeMounts, corev1.VolumeMount{
 				Name:      TLSCAVolumeName,
 				MountPath: "/etc/redis/tls-ca",
@@ -98,7 +98,7 @@ func BuildTLSVolumes(redis *koncachev1alpha1.Redis) []corev1.Volume {
 			}
 
 			// If CA secret is the same as cert secret, include ca.crt in the same volume
-			if redis.Spec.Security.TLS.CASecret == redis.Spec.Security.TLS.CertSecret {
+			if redis.Spec.Security.TLS.CASecret != nil && redis.Spec.Security.TLS.CASecret.Name == redis.Spec.Security.TLS.CertSecret {
 				items = append(items, corev1.KeyToPath{
 					Key:  TLSCAKey,
 					Path: TLSCAKey,
@@ -117,13 +117,13 @@ func BuildTLSVolumes(redis *koncachev1alpha1.Redis) []corev1.Volume {
 		}
 
 		// CA certificate volume (if different from cert secret)
-		if redis.Spec.Security.TLS.CASecret != "" &&
-			redis.Spec.Security.TLS.CASecret != redis.Spec.Security.TLS.CertSecret {
+		if redis.Spec.Security.TLS.CASecret != nil && redis.Spec.Security.TLS.CASecret.Name != "" &&
+			redis.Spec.Security.TLS.CASecret.Name != redis.Spec.Security.TLS.CertSecret {
 			volumes = append(volumes, corev1.Volume{
 				Name: TLSCAVolumeName,
 				VolumeSource: corev1.VolumeSource{
 					Secret: &corev1.SecretVolumeSource{
-						SecretName: redis.Spec.Security.TLS.CASecret,
+						SecretName: redis.Spec.Security.TLS.CASecret.Name,
 						Items: []corev1.KeyToPath{
 							{
 								Key:  TLSCAKey,

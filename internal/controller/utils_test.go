@@ -306,7 +306,12 @@ func TestBuildTLSVolumes(t *testing.T) {
 						TLS: &koncachev1alpha1.RedisTLS{
 							Enabled:    true,
 							CertSecret: testTLSCertsSecret,
-							CASecret:   "ca-certs",
+							CASecret: &corev1.SecretKeySelector{
+								LocalObjectReference: corev1.LocalObjectReference{
+									Name: "ca-certs",
+								},
+								Key: "ca.crt",
+							},
 						},
 					},
 				},

@@ -149,8 +149,8 @@ func TestHAStandaloneIsolation(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "backup-test", Namespace: "default"},
 			Spec: koncachev1alpha1.RedisSpec{
 				HighAvailability: &koncachev1alpha1.RedisHighAvailability{Enabled: false},
-				Backup: koncachev1alpha1.RedisBackup{
-					BackUpInitConfig: koncachev1alpha1.BackupInitConfig{
+				Backup: &koncachev1alpha1.RedisBackup{
+					BackUpInitConfig: &koncachev1alpha1.RedisBackupInitConfig{
 						Enabled: true,
 					},
 				},

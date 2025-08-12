@@ -42,13 +42,15 @@ type StandaloneController struct {
 	client.Client
 	Scheme          *runtime.Scheme
 	CommandExecutor RedisCommandExecutor
+	IstioManager    *IstioManager
 }
 
 // NewStandaloneController creates a new StandaloneController
 func NewStandaloneController(client client.Client, scheme *runtime.Scheme) *StandaloneController {
 	controller := &StandaloneController{
-		Client: client,
-		Scheme: scheme,
+		Client:       client,
+		Scheme:       scheme,
+		IstioManager: NewIstioManager(client, scheme),
 	}
 	controller.CommandExecutor = &RealRedisCommandExecutor{controller: controller}
 	return controller
@@ -88,7 +90,7 @@ func (s *StandaloneController) Reconcile(ctx context.Context, redis *koncachev1a
 	}
 
 	// Create or update backup statefulset if backups are enabled
-	if redis.Spec.Backup.Enabled {
+	if redis.Spec.Backup != nil && redis.Spec.Backup.Enabled {
 		if err := s.reconcileBackupStatefulSet(ctx, redis); err != nil {
 			log.Error(err, "Failed to reconcile backup StatefulSet")
 			return ctrl.Result{}, err
@@ -130,14 +132,20 @@ func (s *StandaloneController) Reconcile(ctx context.Context, redis *koncachev1a
 		}
 	}
 
-	if requeue {
-		return ctrl.Result{Requeue: true}, nil
+	// Reconcile Istio resources if enabled (do this before requeue check)
+	if err := s.IstioManager.ReconcileIstioResources(ctx, redis); err != nil {
+		log.Error(err, "Failed to reconcile Istio resources")
+		return ctrl.Result{}, err
 	}
 
 	// Update the Redis status
 	if err := s.updateRedisStatus(ctx, redis, statefulSets); err != nil {
 		log.Error(err, "Failed to update Redis status")
 		return ctrl.Result{}, err
+	}
+
+	if requeue {
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	return ctrl.Result{}, nil
@@ -431,9 +439,17 @@ func (s *StandaloneController) statefulsSetForRedis(redis *koncachev1alpha1.Redi
 	// Add config hash annotation to trigger pod restart when ConfigMap changes
 	podAnnotations[configHashField] = configHash
 
+	// Add Istio sidecar annotations if Istio is enabled
+	if s.IstioManager != nil {
+		istioAnnotations := s.IstioManager.GetSidecarAnnotations(redis)
+		for k, v := range istioAnnotations {
+			podAnnotations[k] = v
+		}
+	}
+
 	// Build init containers if backup init is enabled
 	var initContainers []corev1.Container
-	if redis.Spec.Backup.BackUpInitConfig.Enabled {
+	if redis.Spec.Backup != nil && redis.Spec.Backup.BackUpInitConfig != nil && redis.Spec.Backup.BackUpInitConfig.Enabled {
 		backupInitContainer := BuildBackupInitContainer(redis)
 		initContainers = append(initContainers, backupInitContainer)
 	}

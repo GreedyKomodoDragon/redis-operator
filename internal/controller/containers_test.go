@@ -110,10 +110,10 @@ func TestBuildBackupContainer(t *testing.T) {
 				Spec: koncachev1alpha1.RedisSpec{
 					Image:           "redis:7.2-alpine",
 					ImagePullPolicy: corev1.PullIfNotPresent,
-					Backup: koncachev1alpha1.RedisBackup{
+					Backup: &koncachev1alpha1.RedisBackup{
 						Enabled: true,
 						Image:   "koncache/redis-backup:latest",
-						Storage: koncachev1alpha1.RedisBackupStorage{
+						Storage: &koncachev1alpha1.RedisBackupStorage{
 							// No S3 configuration
 						},
 					},
@@ -134,12 +134,12 @@ func TestBuildBackupContainer(t *testing.T) {
 				Spec: koncachev1alpha1.RedisSpec{
 					Image:           "redis:7.2-alpine",
 					ImagePullPolicy: corev1.PullIfNotPresent,
-					Backup: koncachev1alpha1.RedisBackup{
+					Backup: &koncachev1alpha1.RedisBackup{
 						Enabled: true,
 						Image:   "koncache/redis-backup:latest",
-						Storage: koncachev1alpha1.RedisBackupStorage{
+						Storage: &koncachev1alpha1.RedisBackupStorage{
 							Type: "s3",
-							S3: &koncachev1alpha1.RedisS3Storage{
+							S3: &koncachev1alpha1.RedisBackupS3Storage{
 								Bucket:     "test-bucket",
 								Region:     "us-west-2",
 								Prefix:     "backups/",
@@ -178,12 +178,12 @@ func TestBuildBackupContainer(t *testing.T) {
 							CertSecret: "redis-tls",
 						},
 					},
-					Backup: koncachev1alpha1.RedisBackup{
+					Backup: &koncachev1alpha1.RedisBackup{
 						Enabled: true,
 						Image:   "koncache/redis-backup:latest",
-						Storage: koncachev1alpha1.RedisBackupStorage{
+						Storage: &koncachev1alpha1.RedisBackupStorage{
 							Type: "s3",
-							S3: &koncachev1alpha1.RedisS3Storage{
+							S3: &koncachev1alpha1.RedisBackupS3Storage{
 								Bucket:     "test-bucket",
 								Region:     "us-east-1",
 								SecretName: "s3-credentials",
@@ -295,10 +295,10 @@ func TestBuildBackupInitContainer(t *testing.T) {
 				},
 				Spec: koncachev1alpha1.RedisSpec{
 					ImagePullPolicy: corev1.PullIfNotPresent,
-					Backup: koncachev1alpha1.RedisBackup{
+					Backup: &koncachev1alpha1.RedisBackup{
 						Enabled: true,
 						Image:   "backup:latest",
-						BackUpInitConfig: koncachev1alpha1.BackupInitConfig{
+						BackUpInitConfig: &koncachev1alpha1.RedisBackupInitConfig{
 							Enabled: true,
 						},
 					},
@@ -317,16 +317,16 @@ func TestBuildBackupInitContainer(t *testing.T) {
 				},
 				Spec: koncachev1alpha1.RedisSpec{
 					ImagePullPolicy: corev1.PullIfNotPresent,
-					Backup: koncachev1alpha1.RedisBackup{
+					Backup: &koncachev1alpha1.RedisBackup{
 						Enabled: true,
 						Image:   "backup:latest",
-						BackUpInitConfig: koncachev1alpha1.BackupInitConfig{
+						BackUpInitConfig: &koncachev1alpha1.RedisBackupInitConfig{
 							Enabled: true,
 							Image:   "backup-init:latest",
 						},
-						Storage: koncachev1alpha1.RedisBackupStorage{
+						Storage: &koncachev1alpha1.RedisBackupStorage{
 							Type: "s3",
-							S3: &koncachev1alpha1.RedisS3Storage{
+							S3: &koncachev1alpha1.RedisBackupS3Storage{
 								Bucket:     "test-bucket",
 								Region:     "us-west-2",
 								Prefix:     "redis-backups",

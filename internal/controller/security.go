@@ -89,9 +89,9 @@ func buildTLSConfig(redis *koncachev1alpha1.Redis) string {
 	// CA certificate
 	if redis.Spec.Security.TLS.CAFile != "" {
 		config += fmt.Sprintf("tls-ca-cert-file %s\n", redis.Spec.Security.TLS.CAFile)
-	} else if redis.Spec.Security.TLS.CASecret != "" {
+	} else if redis.Spec.Security.TLS.CASecret != nil && redis.Spec.Security.TLS.CASecret.Name != "" {
 		// If CA secret is the same as cert secret, CA is in the same volume
-		if redis.Spec.Security.TLS.CASecret == redis.Spec.Security.TLS.CertSecret {
+		if redis.Spec.Security.TLS.CASecret.Name == redis.Spec.Security.TLS.CertSecret {
 			config += "tls-ca-cert-file /etc/redis/tls/ca.crt\n"
 		} else {
 			// CA secret is separate, mounted in different volume

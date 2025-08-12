@@ -1691,15 +1691,15 @@ func TestStandaloneBackupConfiguration(t *testing.T) {
 			HighAvailability: &koncachev1alpha1.RedisHighAvailability{
 				Enabled: false,
 			},
-			Backup: koncachev1alpha1.RedisBackup{
+			Backup: &koncachev1alpha1.RedisBackup{
 				Enabled:  true,
 				Schedule: "0 2 * * *",
-				BackUpInitConfig: koncachev1alpha1.BackupInitConfig{
+				BackUpInitConfig: &koncachev1alpha1.RedisBackupInitConfig{
 					Enabled: true,
 				},
-				Storage: koncachev1alpha1.RedisBackupStorage{
+				Storage: &koncachev1alpha1.RedisBackupStorage{
 					Type: "s3",
-					S3: &koncachev1alpha1.RedisS3Storage{
+					S3: &koncachev1alpha1.RedisBackupS3Storage{
 						Bucket:     "redis-backups",
 						SecretName: "s3-secret",
 					},
