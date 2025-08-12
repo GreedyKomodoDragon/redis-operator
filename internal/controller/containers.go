@@ -150,7 +150,7 @@ func BuildRedisExporterContainer(redis *koncachev1alpha1.Redis, redisPort int32)
 		})
 
 		// Add CA certificate if configured
-		if redis.Spec.Security.TLS.CASecret != "" {
+		if redis.Spec.Security.TLS.CASecret != nil {
 			container.Env = append(container.Env, corev1.EnvVar{
 				Name:  "REDIS_EXPORTER_TLS_CA_CERT_FILE",
 				Value: "/etc/redis/tls/ca.crt",
@@ -200,17 +200,40 @@ func BuildBackupPodTemplateForRedis(redis *koncachev1alpha1.Redis) corev1.PodTem
 	backupContainer := BuildBackupContainer(redis)
 
 	// Create the pod template with the backup container
+	podSpec := corev1.PodSpec{
+		Containers: []corev1.Container{backupContainer},
+		Volumes:    BuildBackupVolumes(redis),
+	}
+
+	// Apply pod template overrides if specified
+	if redis.Spec.Backup != nil && redis.Spec.Backup.PodTemplate != nil {
+		if redis.Spec.Backup.PodTemplate.Spec.NodeSelector != nil {
+			podSpec.NodeSelector = redis.Spec.Backup.PodTemplate.Spec.NodeSelector
+		}
+		if redis.Spec.Backup.PodTemplate.Spec.Tolerations != nil {
+			podSpec.Tolerations = redis.Spec.Backup.PodTemplate.Spec.Tolerations
+		}
+		if redis.Spec.Backup.PodTemplate.Spec.SecurityContext != nil {
+			podSpec.SecurityContext = redis.Spec.Backup.PodTemplate.Spec.SecurityContext
+		}
+		if redis.Spec.Backup.PodTemplate.Spec.Affinity != nil {
+			podSpec.Affinity = redis.Spec.Backup.PodTemplate.Spec.Affinity
+		}
+	}
+
 	return corev1.PodTemplateSpec{
 		ObjectMeta: BuildBackupObjectMeta(redis),
-		Spec: corev1.PodSpec{
-			Containers:      []corev1.Container{backupContainer},
-			Volumes:         BuildBackupVolumes(redis),
-			NodeSelector:    redis.Spec.Backup.PodTemplate.NodeSelector,
-			Tolerations:     redis.Spec.Backup.PodTemplate.Tolerations,
-			SecurityContext: redis.Spec.Backup.PodTemplate.SecurityContext,
-			Affinity:        redis.Spec.Backup.PodTemplate.Affinity,
-		},
+		Spec:       podSpec,
 	}
+}
+
+// getBackupImage safely returns the backup image, providing a default if backup config is nil
+func getBackupImage(redis *koncachev1alpha1.Redis) string {
+	if redis.Spec.Backup != nil && redis.Spec.Backup.Image != "" {
+		return redis.Spec.Backup.Image
+	}
+	// Return a default backup image if not specified
+	return "greedykomodo/redis-backup:latest"
 }
 
 // BuildBackupContainer builds the container for Redis backup jobs
@@ -278,10 +301,10 @@ func BuildBackupContainer(redis *koncachev1alpha1.Redis) corev1.Container {
 	}...)
 
 	// Add backup retention configuration
-	if redis.Spec.Backup.Retention > 0 {
+	if redis.Spec.Backup != nil && redis.Spec.Backup.Retention != nil && redis.Spec.Backup.Retention.Days > 0 {
 		envVars = append(envVars, corev1.EnvVar{
 			Name:  "BACKUP_RETENTION",
-			Value: fmt.Sprintf("%d", redis.Spec.Backup.Retention),
+			Value: fmt.Sprintf("%d", redis.Spec.Backup.Retention.Days),
 		})
 	}
 
@@ -294,7 +317,7 @@ func BuildBackupContainer(redis *koncachev1alpha1.Redis) corev1.Container {
 	})
 
 	// Add S3 configuration if backup S3 settings are configured
-	if redis.Spec.Backup.Storage.Type == "s3" && redis.Spec.Backup.Storage.S3 != nil {
+	if redis.Spec.Backup != nil && redis.Spec.Backup.Storage != nil && redis.Spec.Backup.Storage.Type == "s3" && redis.Spec.Backup.Storage.S3 != nil {
 		envVars = append(envVars, corev1.EnvVar{
 			Name:  "S3_BUCKET",
 			Value: redis.Spec.Backup.Storage.S3.Bucket,
@@ -357,7 +380,7 @@ func BuildBackupContainer(redis *koncachev1alpha1.Redis) corev1.Container {
 
 	backupContainer := corev1.Container{
 		Name:            "redis-backup",
-		Image:           redis.Spec.Backup.Image,
+		Image:           getBackupImage(redis),
 		ImagePullPolicy: redis.Spec.ImagePullPolicy,
 		// Use the image's default entrypoint (/backup)
 		Env: envVars,
@@ -378,7 +401,7 @@ func BuildBackupInitContainer(redis *koncachev1alpha1.Redis) corev1.Container {
 	}
 
 	// Add S3 configuration if storage is configured
-	if redis.Spec.Backup.Storage.S3 != nil {
+	if redis.Spec.Backup != nil && redis.Spec.Backup.Storage != nil && redis.Spec.Backup.Storage.S3 != nil {
 		s3Prefix := redis.Spec.Backup.Storage.S3.Prefix
 		if s3Prefix == "" {
 			s3Prefix = fmt.Sprintf("%s/%s", redis.Namespace, redis.Name)
@@ -441,8 +464,8 @@ func BuildBackupInitContainer(redis *koncachev1alpha1.Redis) corev1.Container {
 	}
 
 	// Use the image from BackupInitConfig if specified, otherwise use backup image
-	image := redis.Spec.Backup.Image
-	if redis.Spec.Backup.BackUpInitConfig.Image != "" {
+	image := getBackupImage(redis)
+	if redis.Spec.Backup != nil && redis.Spec.Backup.BackUpInitConfig != nil && redis.Spec.Backup.BackUpInitConfig.Image != "" {
 		image = redis.Spec.Backup.BackUpInitConfig.Image
 	}
 

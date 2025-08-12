@@ -95,7 +95,7 @@ func (r *RedisReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 }
 
 // reconcileCluster handles the reconciliation of a Redis cluster
-func (r *RedisReconciler) reconcileCluster(ctx context.Context, redis *koncachev1alpha1.Redis) (ctrl.Result, error) {
+func (r *RedisReconciler) reconcileCluster(ctx context.Context, _ *koncachev1alpha1.Redis) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	log.Info("Cluster mode reconciliation not yet implemented")
 	// TODO: Implement cluster mode reconciliation
@@ -401,8 +401,7 @@ func (r *RedisReconciler) DetectPodFailures(ctx context.Context, redis *koncache
 		},
 	}
 
-	err := r.List(ctx, podList, listOpts...)
-	if err != nil {
+	if err := r.List(ctx, podList, listOpts...); err != nil {
 		log.Error(err, "Failed to list pods for failure detection")
 		return
 	}

@@ -428,16 +428,16 @@ func TestStandaloneControllerBackupInitContainer(t *testing.T) {
 						AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 					},
 					ServiceType: corev1.ServiceTypeClusterIP,
-					Backup: koncachev1alpha1.RedisBackup{
+					Backup: &koncachev1alpha1.RedisBackup{
 						Enabled: true,
 						Image:   "backup:latest",
-						BackUpInitConfig: koncachev1alpha1.BackupInitConfig{
+						BackUpInitConfig: &koncachev1alpha1.RedisBackupInitConfig{
 							Enabled: tt.backupInitEnabled,
 							Image:   tt.backupInitImage,
 						},
-						Storage: koncachev1alpha1.RedisBackupStorage{
+						Storage: &koncachev1alpha1.RedisBackupStorage{
 							Type: "s3",
-							S3: &koncachev1alpha1.RedisS3Storage{
+							S3: &koncachev1alpha1.RedisBackupS3Storage{
 								Bucket:     "test-bucket",
 								Region:     "us-west-2",
 								SecretName: "s3-credentials",

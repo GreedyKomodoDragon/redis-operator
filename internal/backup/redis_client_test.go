@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/go-connections/nat"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -291,9 +290,8 @@ func startRedisContainer(ctx context.Context) (testcontainers.Container, string,
 		return nil, "", "", err
 	}
 
-	// Try getting the mapped port using nat.Port type
-	natPort := nat.Port(redisPort)
-	mappedPort, err := container.MappedPort(ctx, natPort)
+	// Get the mapped port
+	mappedPort, err := container.MappedPort(ctx, "6379")
 	if err != nil {
 		return nil, "", "", err
 	}
@@ -322,9 +320,8 @@ func startRedisContainerWithAuth(ctx context.Context, password string) (testcont
 		return nil, "", "", err
 	}
 
-	// Try getting the mapped port using nat.Port type
-	natPort := nat.Port(redisPort)
-	mappedPort, err := container.MappedPort(ctx, natPort)
+	// Get the mapped port
+	mappedPort, err := container.MappedPort(ctx, "6379")
 	if err != nil {
 		return nil, "", "", err
 	}
