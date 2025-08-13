@@ -1,0 +1,36 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: istio-proxy
+  namespace: monitoring
+  labels:
+    app: istio-proxy
+spec:
+  selector:
+    matchLabels:
+      security.istio.io/tlsMode: istio  # This matches all pods with Istio sidecars
+  podMetricsEndpoints:
+  - port: http-envoy-prom  # Port 15090 for Envoy/Istio proxy metrics
+    interval: 15s
+    path: /stats/prometheus
+  namespaceSelector:
+    any: true  # Monitor pods in all namespaces
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: istiod
+  namespace: monitoring
+  labels:
+    app: istiod
+spec:
+  selector:
+    matchLabels:
+      app: istiod  # Monitor Istio control plane
+  podMetricsEndpoints:
+  - port: http-monitoring  # Port 15014 for istiod metrics
+    interval: 15s
+    path: /stats/prometheus
+  namespaceSelector:
+    matchNames:
+    - istio-system
