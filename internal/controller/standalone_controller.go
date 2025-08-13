@@ -192,7 +192,7 @@ func (s *StandaloneController) cleanupPodMonitor(ctx context.Context, redis *kon
 }
 
 func (s *StandaloneController) podMonitorForRedis(redis *koncachev1alpha1.Redis) *monitoringv1.PodMonitor {
-	labels := LabelsForRedis(redis.Name)
+	labels := LabelsForRedisWithVersion(redis)
 	port := "metrics"
 
 	return &monitoringv1.PodMonitor{
@@ -263,8 +263,21 @@ func (s *StandaloneController) reconcileService(ctx context.Context, redis *konc
 	if err != nil && errors.IsNotFound(err) {
 		log.Info("Creating a new Service", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
 		return s.Create(ctx, service)
+	} else if err != nil {
+		return err
 	}
-	return err
+
+	// Service exists, check if it needs to be updated
+	if s.needsServiceUpdate(foundService, service) {
+		log.Info("Service spec has changed, updating", "Service.Name", service.Name)
+		foundService.Spec = service.Spec
+		foundService.Labels = service.Labels
+		foundService.Annotations = service.Annotations
+		return s.Update(ctx, foundService)
+	}
+
+	log.V(1).Info("Service is up-to-date, no changes needed", "Service.Name", service.Name)
+	return nil
 }
 
 // reconcileStatefulSets creates or updates the StatefulSet for Redis
@@ -330,7 +343,7 @@ func (s *StandaloneController) reconcileStatefulSets(ctx context.Context, redis 
 
 // configMapForRedis returns a ConfigMap object for the Redis configuration
 func (s *StandaloneController) configMapForRedis(redis *koncachev1alpha1.Redis, redisConfig string) *corev1.ConfigMap {
-	labels := LabelsForRedis(redis.Name)
+	labels := LabelsForRedisWithVersion(redis)
 
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -346,7 +359,7 @@ func (s *StandaloneController) configMapForRedis(redis *koncachev1alpha1.Redis, 
 
 // serviceForRedis returns a Service object for Redis
 func (s *StandaloneController) serviceForRedis(redis *koncachev1alpha1.Redis) *corev1.Service {
-	labels := LabelsForRedis(redis.Name)
+	labels := LabelsForRedisWithVersion(redis)
 	port := GetRedisPort(redis)
 
 	if redis.Spec.HighAvailability != nil && redis.Spec.HighAvailability.Enabled {
@@ -414,7 +427,7 @@ func (s *StandaloneController) serviceForRedis(redis *koncachev1alpha1.Redis) *c
 
 // statefulsSetForRedis returns a StatefulSet object for Redis
 func (s *StandaloneController) statefulsSetForRedis(redis *koncachev1alpha1.Redis, redisConfig, configHash string) []*appsv1.StatefulSet {
-	labels := LabelsForRedis(redis.Name)
+	labels := LabelsForRedisWithVersion(redis)
 	replicas := int32(1) // Standalone Redis always has 1 replica
 	port := GetRedisPort(redis)
 
@@ -671,9 +684,8 @@ func (s *StandaloneController) reconcileBackupStatefulSet(ctx context.Context, r
 func (s *StandaloneController) backupStatefulSetForRedis(redis *koncachev1alpha1.Redis) *appsv1.StatefulSet {
 	var single int32 = 1
 
-	// Create backup-specific labels
-	labels := LabelsForRedis(redis.Name)
-	labels["app.kubernetes.io/component"] = "backup"
+	// Create backup-specific labels with dynamic version
+	labels := LabelsForRedisBackup(redis)
 
 	return &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1475,5 +1487,68 @@ func (s *StandaloneController) isOwnedByRedis(statefulSet *appsv1.StatefulSet, r
 			return true
 		}
 	}
+	return false
+}
+
+// needsServiceUpdate checks if the Service needs to be updated based on the Redis spec
+func (s *StandaloneController) needsServiceUpdate(existing, desired *corev1.Service) bool {
+	log := logf.Log.WithValues("service", existing.Name)
+
+	// Check if labels have changed
+	if !EqualStringMaps(existing.Labels, desired.Labels) {
+		log.V(1).Info("Service labels have changed",
+			"existing_labels", existing.Labels,
+			"desired_labels", desired.Labels)
+		return true
+	}
+
+	// Check if annotations have changed
+	if !EqualStringMaps(existing.Annotations, desired.Annotations) {
+		log.V(1).Info("Service annotations have changed")
+		return true
+	}
+
+	// Check if selector has changed (this is the critical issue we're fixing)
+	if !EqualStringMaps(existing.Spec.Selector, desired.Spec.Selector) {
+		log.Info("Service selector has changed",
+			"existing_selector", existing.Spec.Selector,
+			"desired_selector", desired.Spec.Selector)
+		return true
+	}
+
+	// Check if service type has changed
+	if existing.Spec.Type != desired.Spec.Type {
+		log.V(1).Info("Service type has changed",
+			"existing_type", existing.Spec.Type,
+			"desired_type", desired.Spec.Type)
+		return true
+	}
+
+	// Check if ports have changed
+	if len(existing.Spec.Ports) != len(desired.Spec.Ports) {
+		log.V(1).Info("Service port count has changed",
+			"existing_count", len(existing.Spec.Ports),
+			"desired_count", len(desired.Spec.Ports))
+		return true
+	}
+
+	for i, existingPort := range existing.Spec.Ports {
+		if i >= len(desired.Spec.Ports) {
+			return true
+		}
+		desiredPort := desired.Spec.Ports[i]
+
+		if existingPort.Name != desiredPort.Name ||
+			existingPort.Port != desiredPort.Port ||
+			existingPort.TargetPort != desiredPort.TargetPort ||
+			existingPort.Protocol != desiredPort.Protocol {
+			log.V(1).Info("Service port configuration has changed",
+				"port_index", i,
+				"existing_port", existingPort,
+				"desired_port", desiredPort)
+			return true
+		}
+	}
+
 	return false
 }
