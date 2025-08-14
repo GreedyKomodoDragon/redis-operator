@@ -58,8 +58,11 @@ type RedisReconciler struct {
 func (r *RedisReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
+	log.Info("Reconciling Redis", "name", req.Name, "namespace", req.Namespace)
+
 	// Initialize sub-controllers if not already done
 	if r.standaloneController == nil {
+		log.Info("Initializing standalone controller")
 		r.standaloneController = NewStandaloneController(r.Client, r.Scheme)
 	}
 
@@ -68,14 +71,14 @@ func (r *RedisReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	err := r.Get(ctx, req.NamespacedName, redis)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			// Request object not found, could have been deleted after reconcile request.
 			log.Info("Redis resource not found. Ignoring since object must be deleted")
 			return ctrl.Result{}, nil
 		}
-		// Error reading the object - requeue the request.
 		log.Error(err, "Failed to get Redis")
 		return ctrl.Result{}, err
 	}
+
+	log.Info("Processing Redis", "name", redis.Name, "mode", redis.Spec.Mode)
 
 	// Handle different Redis modes
 	switch redis.Spec.Mode {

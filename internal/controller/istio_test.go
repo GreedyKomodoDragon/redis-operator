@@ -194,7 +194,7 @@ func TestBuildTrafficPolicyWithConnectionPool(t *testing.T) {
 	} else {
 		if maxConn, exists := tcpMap["maxConnections"]; !exists {
 			t.Error("Expected maxConnections in tcp")
-		} else if maxConn != int32(100) {
+		} else if maxConn != int64(100) {
 			t.Errorf("Expected maxConnections=100, got %v", maxConn)
 		}
 		if tcpNoDelay, exists := tcpMap["tcpNoDelay"]; !exists {
