@@ -138,14 +138,14 @@ func (s *StandaloneController) Reconcile(ctx context.Context, redis *koncachev1a
 		return ctrl.Result{}, err
 	}
 
+	if requeue {
+		return ctrl.Result{Requeue: true}, nil
+	}
+
 	// Update the Redis status
 	if err := s.updateRedisStatus(ctx, redis, statefulSets); err != nil {
 		log.Error(err, "Failed to update Redis status")
 		return ctrl.Result{}, err
-	}
-
-	if requeue {
-		return ctrl.Result{Requeue: true}, nil
 	}
 
 	return ctrl.Result{}, nil
