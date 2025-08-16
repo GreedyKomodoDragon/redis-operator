@@ -5,12 +5,14 @@ import (
 	"fmt"
 
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/yaml"
 
 	koncachev1alpha1 "github.com/GreedyKomodoDragon/redis-operator/api/v1alpha1"
 )
@@ -194,83 +196,188 @@ func (im *IstioManager) reconcileVirtualService(ctx context.Context, redis *konc
 	log := logf.FromContext(ctx)
 	log.Info("Reconciling VirtualService", "redis", redis.Name, "namespace", redis.Namespace)
 
-	virtualService := &unstructured.Unstructured{}
-	virtualService.SetGroupVersionKind(schema.GroupVersionKind{
+	// Create structured VirtualService object
+	virtualService := im.buildVirtualService(redis, vsConfig)
+
+	// Convert to unstructured for controller-runtime compatibility
+	unstructuredVS := im.createUnstructuredVS(virtualService)
+
+	_, err := controllerutil.CreateOrUpdate(ctx, im.Client, unstructuredVS, func() error {
+		return im.updateVirtualServiceSpec(redis, virtualService, vsConfig, unstructuredVS)
+	})
+
+	if err != nil {
+		istioLog.Error(err, "Failed to reconcile VirtualService", "name", unstructuredVS.GetName())
+		return err
+	}
+
+	istioLog.Info("Successfully reconciled VirtualService", "name", unstructuredVS.GetName())
+	return nil
+}
+
+// buildVirtualService creates a structured VirtualService object
+func (im *IstioManager) buildVirtualService(redis *koncachev1alpha1.Redis, vsConfig *koncachev1alpha1.RedisIstioVirtualService) *VirtualService {
+	virtualService := &VirtualService{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "networking.istio.io/v1beta1",
+			Kind:       "VirtualService",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      redis.Name + "-vs",
+			Namespace: redis.Namespace,
+		},
+		Spec: VirtualServiceSpec{
+			Hosts: getVirtualServiceHosts(redis, vsConfig),
+		},
+	}
+
+	// Add gateways if specified
+	if len(vsConfig.Gateways) > 0 {
+		virtualService.Spec.Gateways = vsConfig.Gateways
+	}
+
+	// Create TCP route for Redis port
+	tcpRoute := im.buildTCPRoute(redis)
+	virtualService.Spec.TCP = []TCPRoute{tcpRoute}
+
+	return virtualService
+}
+
+// buildTCPRoute creates a TCP route for the Redis service
+func (im *IstioManager) buildTCPRoute(redis *koncachev1alpha1.Redis) TCPRoute {
+	port := uint32(redis.Spec.Port)
+	return TCPRoute{
+		Match: []L4MatchAttributes{
+			{
+				Port: &port,
+			},
+		},
+		Route: []RouteDestination{
+			{
+				Destination: &Destination{
+					Host: redis.Name,
+					Port: &PortSelector{
+						Number: &port,
+					},
+				},
+			},
+		},
+	}
+}
+
+// createUnstructuredVS creates an unstructured VirtualService object
+func (im *IstioManager) createUnstructuredVS(vs *VirtualService) *unstructured.Unstructured {
+	unstructuredVS := &unstructured.Unstructured{}
+	unstructuredVS.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   VirtualServiceGVR.Group,
 		Version: VirtualServiceGVR.Version,
 		Kind:    "VirtualService",
 	})
-	virtualService.SetName(redis.Name + "-vs")
-	virtualService.SetNamespace(redis.Namespace)
+	unstructuredVS.SetName(vs.Name)
+	unstructuredVS.SetNamespace(vs.Namespace)
+	return unstructuredVS
+}
 
-	_, err := controllerutil.CreateOrUpdate(ctx, im.Client, virtualService, func() error {
-		// Set owner reference
-		if err := controllerutil.SetControllerReference(redis, virtualService, im.Scheme); err != nil {
-			return err
-		}
-
-		// Build spec using SetNestedField to avoid deep copy issues
-		hosts := getVirtualServiceHosts(redis, vsConfig)
-		hostInterfaces := make([]interface{}, len(hosts))
-		for i, host := range hosts {
-			hostInterfaces[i] = host
-		}
-
-		// Set hosts
-		if err := unstructured.SetNestedField(virtualService.Object, hostInterfaces, "spec", "hosts"); err != nil {
-			return err
-		}
-
-		// Add gateways if specified
-		if len(vsConfig.Gateways) > 0 {
-			gatewayInterfaces := make([]interface{}, len(vsConfig.Gateways))
-			for i, gateway := range vsConfig.Gateways {
-				gatewayInterfaces[i] = gateway
-			}
-			if err := unstructured.SetNestedField(virtualService.Object, gatewayInterfaces, "spec", "gateways"); err != nil {
-				return err
-			}
-		}
-
-		// Build TCP routing structure step by step
-		tcpRoutes := []interface{}{
-			map[string]interface{}{
-				"match": []interface{}{
-					map[string]interface{}{
-						"port": int64(redis.Spec.Port),
-					},
-				},
-				"route": []interface{}{
-					map[string]interface{}{
-						"destination": map[string]interface{}{
-							"host": redis.Name,
-							"port": map[string]interface{}{
-								"number": int64(redis.Spec.Port),
-							},
-						},
-					},
-				},
-			},
-		}
-
-		// Add traffic policies if configured
-		if vsConfig.TrafficPolicy != nil && vsConfig.Timeout != nil {
-			if tcpRoute, ok := tcpRoutes[0].(map[string]interface{}); ok {
-				tcpRoute["timeout"] = vsConfig.Timeout.Duration.String()
-			}
-		}
-
-		// Set TCP routes
-		return unstructured.SetNestedField(virtualService.Object, tcpRoutes, "spec", "tcp")
-	})
-
-	if err != nil {
-		istioLog.Error(err, "Failed to reconcile VirtualService", "name", virtualService.GetName())
+// updateVirtualServiceSpec updates the VirtualService spec in the unstructured object
+func (im *IstioManager) updateVirtualServiceSpec(redis *koncachev1alpha1.Redis, vs *VirtualService, vsConfig *koncachev1alpha1.RedisIstioVirtualService, unstructuredVS *unstructured.Unstructured) error {
+	// Set owner reference
+	if err := controllerutil.SetControllerReference(redis, unstructuredVS, im.Scheme); err != nil {
 		return err
 	}
 
-	istioLog.Info("Successfully reconciled VirtualService", "name", virtualService.GetName())
-	return nil
+	// Set hosts
+	if err := im.setVSHosts(unstructuredVS, vs.Spec.Hosts); err != nil {
+		return err
+	}
+
+	// Set gateways if present
+	if err := im.setVSGateways(unstructuredVS, vs.Spec.Gateways); err != nil {
+		return err
+	}
+
+	// Set TCP routes
+	return im.setVSTCPRoutes(unstructuredVS, vs.Spec.TCP, vsConfig)
+}
+
+// setVSHosts sets the hosts field in the VirtualService spec
+func (im *IstioManager) setVSHosts(unstructuredVS *unstructured.Unstructured, hosts []string) error {
+	hostInterfaces := make([]interface{}, len(hosts))
+	for i, host := range hosts {
+		hostInterfaces[i] = host
+	}
+	return unstructured.SetNestedField(unstructuredVS.Object, hostInterfaces, "spec", "hosts")
+}
+
+// setVSGateways sets the gateways field in the VirtualService spec
+func (im *IstioManager) setVSGateways(unstructuredVS *unstructured.Unstructured, gateways []string) error {
+	if len(gateways) == 0 {
+		return nil
+	}
+	gatewayInterfaces := make([]interface{}, len(gateways))
+	for i, gateway := range gateways {
+		gatewayInterfaces[i] = gateway
+	}
+	return unstructured.SetNestedField(unstructuredVS.Object, gatewayInterfaces, "spec", "gateways")
+}
+
+// setVSTCPRoutes sets the TCP routes field in the VirtualService spec
+func (im *IstioManager) setVSTCPRoutes(unstructuredVS *unstructured.Unstructured, tcpRoutes []TCPRoute, vsConfig *koncachev1alpha1.RedisIstioVirtualService) error {
+	tcpRoutesInterface := make([]interface{}, len(tcpRoutes))
+	for i, tcpRoute := range tcpRoutes {
+		tcpRouteMap := im.buildTCPRouteMap(tcpRoute, vsConfig)
+		tcpRoutesInterface[i] = tcpRouteMap
+	}
+	return unstructured.SetNestedField(unstructuredVS.Object, tcpRoutesInterface, "spec", "tcp")
+}
+
+// buildTCPRouteMap builds a TCP route map from a structured TCPRoute
+func (im *IstioManager) buildTCPRouteMap(tcpRoute TCPRoute, vsConfig *koncachev1alpha1.RedisIstioVirtualService) map[string]interface{} {
+	// Build match criteria
+	matches := make([]interface{}, len(tcpRoute.Match))
+	for j, match := range tcpRoute.Match {
+		matchMap := make(map[string]interface{})
+		if match.Port != nil {
+			matchMap["port"] = int64(*match.Port)
+		}
+		matches[j] = matchMap
+	}
+
+	// Build route destinations
+	routes := make([]interface{}, len(tcpRoute.Route))
+	for j, route := range tcpRoute.Route {
+		routeMap := map[string]interface{}{
+			"destination": map[string]interface{}{
+				"host": route.Destination.Host,
+			},
+		}
+		if route.Destination.Port != nil && route.Destination.Port.Number != nil {
+			routeMap["destination"].(map[string]interface{})["port"] = map[string]interface{}{
+				"number": int64(*route.Destination.Port.Number),
+			}
+		}
+		routes[j] = routeMap
+	}
+
+	tcpRouteMap := map[string]interface{}{
+		"match": matches,
+		"route": routes,
+	}
+
+	// Add timeout if configured
+	if vsConfig.TrafficPolicy != nil && vsConfig.Timeout != nil {
+		tcpRouteMap["timeout"] = vsConfig.Timeout.Duration.String()
+	}
+
+	return tcpRouteMap
+}
+
+// ToYAML converts a VirtualService to YAML representation for debugging
+func (vs *VirtualService) ToYAML() (string, error) {
+	yamlBytes, err := yaml.Marshal(vs)
+	if err != nil {
+		return "", err
+	}
+	return string(yamlBytes), nil
 }
 
 // reconcilePeerAuthentication creates or updates a PeerAuthentication for the Redis instance
@@ -347,7 +454,17 @@ func (im *IstioManager) cleanupIstioResources(ctx context.Context, redis *koncac
 	return nil
 }
 
-// Helper functions
+// Debugging and helper functions
+
+// ConvertVirtualServiceToYAML converts a VirtualService object to YAML for debugging
+func (im *IstioManager) ConvertVirtualServiceToYAML(redis *koncachev1alpha1.Redis, vsConfig *koncachev1alpha1.RedisIstioVirtualService) (string, error) {
+	virtualService := im.buildVirtualService(redis, vsConfig)
+	yamlData, err := yaml.Marshal(virtualService)
+	if err != nil {
+		return "", err
+	}
+	return string(yamlData), nil
+}
 
 func getBoolValue(ptr *bool, defaultValue bool) bool {
 	if ptr != nil {
