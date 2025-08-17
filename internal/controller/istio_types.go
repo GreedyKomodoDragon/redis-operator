@@ -164,3 +164,191 @@ type HTTPFaultInjectionAbort struct {
 type Percentage struct {
 	Value float64 `json:"value,omitempty"`
 }
+
+// UnstructuredTCPRoute represents a TCP route for unstructured conversion
+type UnstructuredTCPRoute struct {
+	Match   []UnstructuredL4Match     `json:"match,omitempty"`
+	Route   []UnstructuredDestination `json:"route,omitempty"`
+	Timeout *string                   `json:"timeout,omitempty"`
+}
+
+// UnstructuredL4Match represents L4 match for unstructured conversion
+type UnstructuredL4Match struct {
+	Port               *int64            `json:"port,omitempty"`
+	SourceLabels       map[string]string `json:"sourceLabels,omitempty"`
+	Gateways           []string          `json:"gateways,omitempty"`
+	DestinationSubnets []string          `json:"destinationSubnets,omitempty"`
+}
+
+// UnstructuredDestination represents a destination for unstructured conversion
+type UnstructuredDestination struct {
+	Destination UnstructuredServiceDestination `json:"destination"`
+	Weight      *int32                         `json:"weight,omitempty"`
+}
+
+// UnstructuredServiceDestination represents service destination for unstructured conversion
+type UnstructuredServiceDestination struct {
+	Host   string                    `json:"host"`
+	Subset string                    `json:"subset,omitempty"`
+	Port   *UnstructuredPortSelector `json:"port,omitempty"`
+}
+
+// UnstructuredPortSelector represents port selector for unstructured conversion
+type UnstructuredPortSelector struct {
+	Number *int64 `json:"number,omitempty"`
+	Name   string `json:"name,omitempty"`
+}
+
+// ToUnstructured converts a structured TCPRoute to an unstructured representation
+func (tr *TCPRoute) ToUnstructured(timeout *string) *UnstructuredTCPRoute {
+	unstructured := &UnstructuredTCPRoute{
+		Match:   make([]UnstructuredL4Match, len(tr.Match)),
+		Route:   make([]UnstructuredDestination, len(tr.Route)),
+		Timeout: timeout,
+	}
+
+	// Convert matches
+	for i, match := range tr.Match {
+		unstructured.Match[i] = UnstructuredL4Match{
+			SourceLabels:       match.SourceLabels,
+			Gateways:           match.Gateways,
+			DestinationSubnets: match.DestinationSubnets,
+		}
+		if match.Port != nil {
+			port := int64(*match.Port)
+			unstructured.Match[i].Port = &port
+		}
+	}
+
+	// Convert routes
+	for i, route := range tr.Route {
+		unstructured.Route[i] = UnstructuredDestination{
+			Destination: UnstructuredServiceDestination{
+				Host:   route.Destination.Host,
+				Subset: route.Destination.Subset,
+			},
+			Weight: route.Weight,
+		}
+		if route.Destination.Port != nil {
+			if route.Destination.Port.Number != nil {
+				port := int64(*route.Destination.Port.Number)
+				unstructured.Route[i].Destination.Port = &UnstructuredPortSelector{
+					Number: &port,
+					Name:   route.Destination.Port.Name,
+				}
+			} else if route.Destination.Port.Name != "" {
+				unstructured.Route[i].Destination.Port = &UnstructuredPortSelector{
+					Name: route.Destination.Port.Name,
+				}
+			}
+		}
+	}
+
+	return unstructured
+}
+
+// ToMap converts UnstructuredTCPRoute to map[string]interface{}
+func (utr *UnstructuredTCPRoute) ToMap() map[string]interface{} {
+	result := make(map[string]interface{})
+
+	// Convert matches
+	if len(utr.Match) > 0 {
+		result["match"] = utr.convertMatches()
+	}
+
+	// Convert routes
+	if len(utr.Route) > 0 {
+		result["route"] = utr.convertRoutes()
+	}
+
+	// Timeout
+	if utr.Timeout != nil {
+		result["timeout"] = *utr.Timeout
+	}
+
+	return result
+}
+
+// convertMatches converts match criteria to interface{} slice
+func (utr *UnstructuredTCPRoute) convertMatches() []interface{} {
+	matches := make([]interface{}, len(utr.Match))
+	for i, match := range utr.Match {
+		matches[i] = utr.convertSingleMatch(match)
+	}
+	return matches
+}
+
+// convertSingleMatch converts a single match criterion
+func (utr *UnstructuredTCPRoute) convertSingleMatch(match UnstructuredL4Match) map[string]interface{} {
+	matchMap := make(map[string]interface{})
+
+	if match.Port != nil {
+		matchMap["port"] = *match.Port
+	}
+	if len(match.SourceLabels) > 0 {
+		matchMap["sourceLabels"] = match.SourceLabels
+	}
+	if len(match.Gateways) > 0 {
+		matchMap["gateways"] = match.Gateways
+	}
+	if len(match.DestinationSubnets) > 0 {
+		matchMap["destinationSubnets"] = match.DestinationSubnets
+	}
+
+	return matchMap
+}
+
+// convertRoutes converts route destinations to interface{} slice
+func (utr *UnstructuredTCPRoute) convertRoutes() []interface{} {
+	routes := make([]interface{}, len(utr.Route))
+	for i, route := range utr.Route {
+		routes[i] = utr.convertSingleRoute(route)
+	}
+	return routes
+}
+
+// convertSingleRoute converts a single route destination
+func (utr *UnstructuredTCPRoute) convertSingleRoute(route UnstructuredDestination) map[string]interface{} {
+	routeMap := map[string]interface{}{
+		"destination": utr.convertDestination(route.Destination),
+	}
+
+	if route.Weight != nil {
+		routeMap["weight"] = *route.Weight
+	}
+
+	return routeMap
+}
+
+// convertDestination converts destination to map
+func (utr *UnstructuredTCPRoute) convertDestination(dest UnstructuredServiceDestination) map[string]interface{} {
+	destination := map[string]interface{}{
+		"host": dest.Host,
+	}
+
+	if dest.Subset != "" {
+		destination["subset"] = dest.Subset
+	}
+
+	if dest.Port != nil {
+		if portMap := utr.convertPort(*dest.Port); len(portMap) > 0 {
+			destination["port"] = portMap
+		}
+	}
+
+	return destination
+}
+
+// convertPort converts port selector to map
+func (utr *UnstructuredTCPRoute) convertPort(port UnstructuredPortSelector) map[string]interface{} {
+	portMap := make(map[string]interface{})
+
+	if port.Number != nil {
+		portMap["number"] = *port.Number
+	}
+	if port.Name != "" {
+		portMap["name"] = port.Name
+	}
+
+	return portMap
+}

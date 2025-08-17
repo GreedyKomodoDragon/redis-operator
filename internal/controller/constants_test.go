@@ -22,4 +22,10 @@ const (
 	// Test case names
 	testAuthEnabledCase = "auth enabled"
 	testTLSEnabledCase  = "TLS enabled"
+
+	// Security configuration constants
+	protectedModeYes  = "protected-mode yes"
+	protectedModeNo   = "protected-mode no"
+	requirepassConfig = "requirepass $REDIS_PASSWORD"
+	masterauthConfig  = "masterauth $REDIS_PASSWORD"
 )

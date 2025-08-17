@@ -332,43 +332,18 @@ func (im *IstioManager) setVSTCPRoutes(unstructuredVS *unstructured.Unstructured
 
 // buildTCPRouteMap builds a TCP route map from a structured TCPRoute
 func (im *IstioManager) buildTCPRouteMap(tcpRoute TCPRoute, vsConfig *koncachev1alpha1.RedisIstioVirtualService) map[string]interface{} {
-	// Build match criteria
-	matches := make([]interface{}, len(tcpRoute.Match))
-	for j, match := range tcpRoute.Match {
-		matchMap := make(map[string]interface{})
-		if match.Port != nil {
-			matchMap["port"] = int64(*match.Port)
-		}
-		matches[j] = matchMap
-	}
-
-	// Build route destinations
-	routes := make([]interface{}, len(tcpRoute.Route))
-	for j, route := range tcpRoute.Route {
-		routeMap := map[string]interface{}{
-			"destination": map[string]interface{}{
-				"host": route.Destination.Host,
-			},
-		}
-		if route.Destination.Port != nil && route.Destination.Port.Number != nil {
-			routeMap["destination"].(map[string]interface{})["port"] = map[string]interface{}{
-				"number": int64(*route.Destination.Port.Number),
-			}
-		}
-		routes[j] = routeMap
-	}
-
-	tcpRouteMap := map[string]interface{}{
-		"match": matches,
-		"route": routes,
-	}
-
-	// Add timeout if configured
+	// Determine timeout if configured
+	var timeout *string
 	if vsConfig.TrafficPolicy != nil && vsConfig.Timeout != nil {
-		tcpRouteMap["timeout"] = vsConfig.Timeout.Duration.String()
+		timeoutStr := vsConfig.Timeout.Duration.String()
+		timeout = &timeoutStr
 	}
 
-	return tcpRouteMap
+	// Convert structured TCPRoute to unstructured representation
+	unstructuredRoute := tcpRoute.ToUnstructured(timeout)
+
+	// Convert to map[string]interface{} using the structured approach
+	return unstructuredRoute.ToMap()
 }
 
 // ToYAML converts a VirtualService to YAML representation for debugging

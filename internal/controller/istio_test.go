@@ -4,6 +4,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	koncachev1alpha1 "github.com/GreedyKomodoDragon/redis-operator/api/v1alpha1"
@@ -35,9 +37,7 @@ func TestGetSidecarAnnotationsDisabled(t *testing.T) {
 	annotations := istioManager.GetSidecarAnnotations(redis)
 
 	// Should return empty annotations when Istio is not configured
-	if len(annotations) != 0 {
-		t.Errorf("Expected empty annotations, got %d annotations", len(annotations))
-	}
+	assert.Empty(t, annotations, "Expected empty annotations when Istio is not configured")
 }
 
 func TestGetSidecarAnnotationsEnabled(t *testing.T) {
@@ -82,16 +82,11 @@ func TestGetSidecarAnnotationsEnabled(t *testing.T) {
 		"sidecar.istio.io/PROXY_CONFIG_CPU":                             "100m",
 	}
 
-	if len(annotations) != len(expectedAnnotations) {
-		t.Errorf("Expected %d annotations, got %d", len(expectedAnnotations), len(annotations))
-	}
+	assert.Len(t, annotations, len(expectedAnnotations), "Annotation count should match expected")
 
 	for expectedKey, expectedValue := range expectedAnnotations {
-		if actualValue, exists := annotations[expectedKey]; !exists {
-			t.Errorf("Expected annotation %s not found", expectedKey)
-		} else if actualValue != expectedValue {
-			t.Errorf("Expected annotation %s=%s, got %s=%s", expectedKey, expectedValue, expectedKey, actualValue)
-		}
+		assert.Contains(t, annotations, expectedKey, "Expected annotation %s should be present", expectedKey)
+		assert.Equal(t, expectedValue, annotations[expectedKey], "Annotation %s should have correct value", expectedKey)
 	}
 }
 
@@ -125,20 +120,14 @@ func TestGetSidecarAnnotationsDisabledExplicitly(t *testing.T) {
 	annotations := istioManager.GetSidecarAnnotations(redis)
 
 	// Should have sidecar injection disabled
-	expectedValue := "false"
-	if actualValue, exists := annotations[SidecarInjectAnnotation]; !exists {
-		t.Errorf("Expected annotation %s not found", SidecarInjectAnnotation)
-	} else if actualValue != expectedValue {
-		t.Errorf("Expected %s=%s, got %s", SidecarInjectAnnotation, expectedValue, actualValue)
-	}
+	assert.Contains(t, annotations, SidecarInjectAnnotation, "Expected sidecar injection annotation")
+	assert.Equal(t, "false", annotations[SidecarInjectAnnotation], "Expected sidecar injection to be disabled")
 }
 
 func TestBuildTrafficPolicy(t *testing.T) {
 	// Test with nil policy
 	result := buildTrafficPolicy(nil)
-	if len(result) != 0 {
-		t.Errorf("Expected empty result for nil policy, got %d items", len(result))
-	}
+	assert.Empty(t, result, "Expected empty result for nil policy")
 
 	// Test with simple load balancer policy
 	policy := &koncachev1alpha1.RedisIstioTrafficPolicy{
@@ -150,19 +139,13 @@ func TestBuildTrafficPolicy(t *testing.T) {
 	result = buildTrafficPolicy(policy)
 
 	// Check load balancer
-	if lb, exists := result["loadBalancer"]; !exists {
-		t.Error("Expected loadBalancer in result")
-	} else {
-		if lbMap, ok := lb.(map[string]interface{}); !ok {
-			t.Error("Expected loadBalancer to be a map")
-		} else {
-			if simple, exists := lbMap["simple"]; !exists {
-				t.Error("Expected simple in loadBalancer")
-			} else if simple != "ROUND_ROBIN" {
-				t.Errorf("Expected simple=ROUND_ROBIN, got %s", simple)
-			}
-		}
-	}
+	require.Contains(t, result, "loadBalancer", "Expected loadBalancer in result")
+
+	lbMap, ok := result["loadBalancer"].(map[string]interface{})
+	require.True(t, ok, "Expected loadBalancer to be a map")
+
+	require.Contains(t, lbMap, "simple", "Expected simple in loadBalancer")
+	assert.Equal(t, "ROUND_ROBIN", lbMap["simple"], "Expected simple=ROUND_ROBIN")
 }
 
 func TestBuildTrafficPolicyWithConnectionPool(t *testing.T) {
@@ -183,24 +166,80 @@ func TestBuildTrafficPolicyWithConnectionPool(t *testing.T) {
 	result := buildTrafficPolicy(policy)
 
 	// Check connection pool
-	if cp, exists := result["connectionPool"]; !exists {
-		t.Error("Expected connectionPool in result")
-	} else if cpMap, ok := cp.(map[string]interface{}); !ok {
-		t.Error("Expected connectionPool to be a map")
-	} else if tcp, exists := cpMap["tcp"]; !exists {
-		t.Error("Expected tcp in connectionPool")
-	} else if tcpMap, ok := tcp.(map[string]interface{}); !ok {
-		t.Error("Expected tcp to be a map")
-	} else {
-		if maxConn, exists := tcpMap["maxConnections"]; !exists {
-			t.Error("Expected maxConnections in tcp")
-		} else if maxConn != int64(100) {
-			t.Errorf("Expected maxConnections=100, got %v", maxConn)
-		}
-		if tcpNoDelay, exists := tcpMap["tcpNoDelay"]; !exists {
-			t.Error("Expected tcpNoDelay in tcp")
-		} else if tcpNoDelay != true {
-			t.Errorf("Expected tcpNoDelay=true, got %v", tcpNoDelay)
-		}
+	require.Contains(t, result, "connectionPool", "Expected connectionPool in result")
+
+	cpMap, ok := result["connectionPool"].(map[string]interface{})
+	require.True(t, ok, "Expected connectionPool to be a map")
+
+	require.Contains(t, cpMap, "tcp", "Expected tcp in connectionPool")
+
+	tcpMap, ok := cpMap["tcp"].(map[string]interface{})
+	require.True(t, ok, "Expected tcp to be a map")
+
+	require.Contains(t, tcpMap, "maxConnections", "Expected maxConnections in tcp")
+	assert.Equal(t, int64(100), tcpMap["maxConnections"], "Expected maxConnections=100")
+
+	require.Contains(t, tcpMap, "tcpNoDelay", "Expected tcpNoDelay in tcp")
+	assert.Equal(t, true, tcpMap["tcpNoDelay"], "Expected tcpNoDelay=true")
+}
+
+func TestVirtualServiceStructuredConversion(t *testing.T) {
+	// Test our new structured approach to VirtualService conversion
+	port := uint32(6379)
+	tcpRoute := TCPRoute{
+		Match: []L4MatchAttributes{
+			{
+				Port: &port,
+			},
+		},
+		Route: []RouteDestination{
+			{
+				Destination: &Destination{
+					Host: "redis-service",
+					Port: &PortSelector{
+						Number: &port,
+					},
+				},
+			},
+		},
 	}
+
+	timeout := "30s"
+	unstructured := tcpRoute.ToUnstructured(&timeout)
+
+	t.Run("match conversion", func(t *testing.T) {
+		require.Len(t, unstructured.Match, 1, "Expected 1 match")
+		require.NotNil(t, unstructured.Match[0].Port, "Expected port to be set")
+		assert.Equal(t, int64(port), *unstructured.Match[0].Port, "Expected correct port")
+	})
+
+	t.Run("route conversion", func(t *testing.T) {
+		require.Len(t, unstructured.Route, 1, "Expected 1 route")
+		assert.Equal(t, "redis-service", unstructured.Route[0].Destination.Host, "Expected correct host")
+	})
+
+	t.Run("timeout conversion", func(t *testing.T) {
+		require.NotNil(t, unstructured.Timeout, "Expected timeout to be set")
+		assert.Equal(t, timeout, *unstructured.Timeout, "Expected correct timeout")
+	})
+
+	t.Run("map conversion", func(t *testing.T) {
+		resultMap := unstructured.ToMap()
+
+		// Verify map structure
+		require.Contains(t, resultMap, "match", "Expected match in result map")
+		matchSlice, ok := resultMap["match"].([]interface{})
+		require.True(t, ok, "Expected match to be slice")
+		assert.Len(t, matchSlice, 1, "Expected 1 match in slice")
+
+		require.Contains(t, resultMap, "route", "Expected route in result map")
+		routeSlice, ok := resultMap["route"].([]interface{})
+		require.True(t, ok, "Expected route to be slice")
+		assert.Len(t, routeSlice, 1, "Expected 1 route in slice")
+
+		require.Contains(t, resultMap, "timeout", "Expected timeout in result map")
+		timeoutStr, ok := resultMap["timeout"].(string)
+		require.True(t, ok, "Expected timeout to be string")
+		assert.Equal(t, timeout, timeoutStr, "Expected correct timeout string")
+	})
 }

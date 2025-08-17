@@ -60,7 +60,14 @@ func BuildSecurityConfig(redis *koncachev1alpha1.Redis) string {
 // buildAuthConfig builds authentication configuration
 func buildAuthConfig(redis *koncachev1alpha1.Redis) string {
 	if IsAuthEnabled(redis) {
-		return "protected-mode yes\nrequirepass $REDIS_PASSWORD\n"
+		config := "protected-mode yes\nrequirepass $REDIS_PASSWORD\n"
+
+		// For HA deployments, also add masterauth for replication authentication
+		if redis.Spec.HighAvailability != nil && redis.Spec.HighAvailability.Enabled {
+			config += "masterauth $REDIS_PASSWORD\n"
+		}
+
+		return config
 	}
 	return "protected-mode no\n"
 }
