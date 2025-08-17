@@ -220,7 +220,7 @@ func TestBuildSecurityConfig(t *testing.T) {
 			redis: &koncachev1alpha1.Redis{
 				Spec: koncachev1alpha1.RedisSpec{},
 			},
-			contains: []string{"protected-mode no"},
+			contains: []string{protectedModeNo},
 		},
 		{
 			name: testAuthEnabledCase,
@@ -232,8 +232,8 @@ func TestBuildSecurityConfig(t *testing.T) {
 				},
 			},
 			contains: []string{
-				"protected-mode yes",
-				"requirepass $REDIS_PASSWORD",
+				protectedModeYes,
+				requirepassConfig,
 			},
 		},
 		{
@@ -253,6 +253,39 @@ func TestBuildSecurityConfig(t *testing.T) {
 				"tls-cert-file /etc/redis/tls/tls.crt",
 				"tls-key-file /etc/redis/tls/tls.key",
 				"tls-auth-clients yes",
+			},
+		},
+		{
+			name: "auth enabled with HA",
+			redis: &koncachev1alpha1.Redis{
+				Spec: koncachev1alpha1.RedisSpec{
+					Security: koncachev1alpha1.RedisSecurity{
+						RequireAuth: &[]bool{true}[0],
+					},
+					HighAvailability: &koncachev1alpha1.RedisHighAvailability{
+						Enabled:  true,
+						Replicas: 3,
+					},
+				},
+			},
+			contains: []string{
+				protectedModeYes,
+				requirepassConfig,
+				masterauthConfig,
+			},
+		},
+		{
+			name: "auth enabled without HA",
+			redis: &koncachev1alpha1.Redis{
+				Spec: koncachev1alpha1.RedisSpec{
+					Security: koncachev1alpha1.RedisSecurity{
+						RequireAuth: &[]bool{true}[0],
+					},
+				},
+			},
+			contains: []string{
+				protectedModeYes,
+				requirepassConfig,
 			},
 		},
 		{
@@ -279,6 +312,80 @@ func TestBuildSecurityConfig(t *testing.T) {
 			result := controller.BuildSecurityConfig(tt.redis)
 			for _, expectedSubstring := range tt.contains {
 				assert.Contains(t, result, expectedSubstring)
+			}
+		})
+	}
+}
+
+func TestBuildAuthConfigMasterAuthOnlyForHA(t *testing.T) {
+	tests := []struct {
+		name                    string
+		redis                   *koncachev1alpha1.Redis
+		shouldContainMasterAuth bool
+	}{
+		{
+			name: "auth enabled with HA should include masterauth",
+			redis: &koncachev1alpha1.Redis{
+				Spec: koncachev1alpha1.RedisSpec{
+					Security: koncachev1alpha1.RedisSecurity{
+						RequireAuth: &[]bool{true}[0],
+					},
+					HighAvailability: &koncachev1alpha1.RedisHighAvailability{
+						Enabled:  true,
+						Replicas: 3,
+					},
+				},
+			},
+			shouldContainMasterAuth: true,
+		},
+		{
+			name: "auth enabled without HA should not include masterauth",
+			redis: &koncachev1alpha1.Redis{
+				Spec: koncachev1alpha1.RedisSpec{
+					Security: koncachev1alpha1.RedisSecurity{
+						RequireAuth: &[]bool{true}[0],
+					},
+				},
+			},
+			shouldContainMasterAuth: false,
+		},
+		{
+			name: "auth enabled with HA disabled should not include masterauth",
+			redis: &koncachev1alpha1.Redis{
+				Spec: koncachev1alpha1.RedisSpec{
+					Security: koncachev1alpha1.RedisSecurity{
+						RequireAuth: &[]bool{true}[0],
+					},
+					HighAvailability: &koncachev1alpha1.RedisHighAvailability{
+						Enabled:  false,
+						Replicas: 3,
+					},
+				},
+			},
+			shouldContainMasterAuth: false,
+		},
+		{
+			name: "no auth should not include masterauth",
+			redis: &koncachev1alpha1.Redis{
+				Spec: koncachev1alpha1.RedisSpec{
+					HighAvailability: &koncachev1alpha1.RedisHighAvailability{
+						Enabled:  true,
+						Replicas: 3,
+					},
+				},
+			},
+			shouldContainMasterAuth: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := controller.BuildSecurityConfig(tt.redis)
+
+			if tt.shouldContainMasterAuth {
+				assert.Contains(t, result, masterauthConfig, "Should contain masterauth for HA deployments with auth")
+			} else {
+				assert.NotContains(t, result, masterauthConfig, "Should not contain masterauth for non-HA or non-auth deployments")
 			}
 		})
 	}
