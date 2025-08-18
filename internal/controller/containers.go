@@ -58,7 +58,16 @@ func BuildRedisContainer(redis *koncachev1alpha1.Redis, port int32) corev1.Conta
 		Command: []string{"sh", "-c"},
 		Args: []string{
 			`# Replace environment variables in config and start Redis
-			sed 's/\$REDIS_PASSWORD/'"$REDIS_PASSWORD"'/g' /usr/local/etc/redis/redis.conf > /tmp/redis.conf && redis-server /tmp/redis.conf`,
+			# Use printf to safely substitute the password without shell interpretation issues
+			sed -e '/^requirepass /d' -e '/^masterauth /d' /usr/local/etc/redis/redis.conf > /tmp/redis_base.conf && \
+			if [ -n "$REDIS_PASSWORD" ]; then
+				printf 'requirepass %s\n' "$REDIS_PASSWORD" >> /tmp/redis_base.conf
+				# Check if this is an HA deployment by looking for masterauth in original config
+				if grep -q "^masterauth" /usr/local/etc/redis/redis.conf; then
+					printf 'masterauth %s\n' "$REDIS_PASSWORD" >> /tmp/redis_base.conf
+				fi
+			fi && \
+			mv /tmp/redis_base.conf /tmp/redis.conf && redis-server /tmp/redis.conf`,
 		},
 	}
 
