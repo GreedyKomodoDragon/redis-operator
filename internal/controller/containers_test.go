@@ -48,6 +48,23 @@ func TestBuildRedisContainer(t *testing.T) {
 			},
 			port: 7000,
 		},
+		{
+			name: "HA container with authentication",
+			redis: &koncachev1alpha1.Redis{
+				Spec: koncachev1alpha1.RedisSpec{
+					Image:           "redis:7.2-alpine",
+					ImagePullPolicy: corev1.PullIfNotPresent,
+					Security: koncachev1alpha1.RedisSecurity{
+						RequireAuth: &[]bool{true}[0],
+					},
+					HighAvailability: &koncachev1alpha1.RedisHighAvailability{
+						Enabled:  true,
+						Replicas: 3,
+					},
+				},
+			},
+			port: 6379,
+		},
 	}
 
 	for _, tt := range tests {
@@ -88,8 +105,15 @@ func TestBuildRedisContainer(t *testing.T) {
 
 			// Test that args contain the Redis startup script with environment variable substitution
 			require.Len(t, result.Args, 1, "Container should have exactly 1 arg")
-			assert.Contains(t, result.Args[0], "sed 's/\\$REDIS_PASSWORD/'", "Args should contain password substitution logic")
+			assert.Contains(t, result.Args[0], "sed -e '/^requirepass /d' -e '/^masterauth /d'", "Args should contain password line removal logic")
+			assert.Contains(t, result.Args[0], "printf 'requirepass %s\\n' \"$REDIS_PASSWORD\"", "Args should contain printf password substitution")
 			assert.Contains(t, result.Args[0], "redis-server /tmp/redis.conf", "Args should contain redis-server command")
+
+			// For HA configurations with auth, also check for masterauth handling
+			if tt.redis.Spec.HighAvailability != nil && tt.redis.Spec.HighAvailability.Enabled &&
+				tt.redis.Spec.Security.RequireAuth != nil && *tt.redis.Spec.Security.RequireAuth {
+				assert.Contains(t, result.Args[0], "printf 'masterauth %s\\n' \"$REDIS_PASSWORD\"", "Args should contain masterauth substitution for HA")
+			}
 		})
 	}
 }
